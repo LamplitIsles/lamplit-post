@@ -2,6 +2,8 @@ import { Schema } from "@koishijs/core";
 import { parse } from "yaml";
 import { readFile, stat } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
+import { createRequire } from "node:module";
+import { realpath } from "node:fs/promises";
 const id = () =>
   Schema.string()
     .pattern(/^[a-zA-Z0-9_-]{1,64}$/)
@@ -36,9 +38,7 @@ const fields = Schema.object({
       native_id: text(),
       homeserver: Schema.string(),
     }),
-  )
-    .min(1)
-    .required(),
+  ).required(),
   bindings: Schema.array(
     Schema.object({
       id: id(),
@@ -53,9 +53,7 @@ const fields = Schema.object({
         aliases: Schema.array(text().max(128)).default([]),
       }).required(),
     }),
-  )
-    .min(1)
-    .required(),
+  ).required(),
 });
 /** Strictness derives from the same framework field schema, never a parallel schema. */
 function strict(schema: Schema, value: any) {
@@ -163,6 +161,7 @@ export async function loadConfig(path: string) {
   if (JSON.stringify(root.plugins[plugin]).includes("${{"))
     throw new Error("Use literal Post configuration values");
   const cfg = ConfigSchema(root.plugins[plugin]);
+  await validateConsole(root, plugin, cfg);
   cfg.data_dir = resolve(dirname(path), cfg.data_dir);
   cfg.master_key_file = resolve(dirname(path), cfg.master_key_file);
   if (
@@ -176,4 +175,89 @@ export async function privateFile(path: string) {
   const s = await stat(path);
   if (!s.isFile() || s.mode & 0o077)
     throw new Error("Private file permissions required");
+}
+
+/** The unauthenticated native preview is an empty, fixed read-only plugin set. */
+async function validateConsole(
+  root: { plugins: Record<string, unknown>; [key: string]: unknown },
+  post: string,
+  cfg: Config,
+) {
+  const { plugins } = root;
+  function hasConsole(entries: Record<string, unknown>): boolean {
+    return Object.entries(entries).some(
+      ([key, value]) =>
+        /(?:^|\/)(?:plugin-)?console(?:\/|:|$)/.test(key) ||
+        (key.split(":")[0] === "group" &&
+          !!value &&
+          typeof value === "object" &&
+          hasConsole(value as Record<string, unknown>)),
+    );
+  }
+  if (!hasConsole(plugins)) return;
+  if (
+    ["host", "port", "maxPort", "selfUrl"].some((key) =>
+      Object.hasOwn(root, key),
+    )
+  )
+    throw new Error(
+      "Use only the explicit Console server entry, not legacy root listeners",
+    );
+  const entries = Object.keys(plugins).filter((key) => key !== post);
+  const require = createRequire(resolve(process.argv[1]));
+  const names = ["server", "console", "status"];
+  if (
+    entries.length !== names.length ||
+    cfg.accounts.length ||
+    cfg.bindings.length
+  )
+    throw new Error(
+      "Console preview requires only native read-only plugins and empty Post",
+    );
+  for (const name of names) {
+    const key = entries.find((key) =>
+      key.includes("/@koishijs/plugin-" + name + "/"),
+    );
+    if (
+      !key ||
+      !key.startsWith("/") ||
+      (await realpath(key.replace(/:[a-z0-9]+$/, ""))) !==
+        (await realpath(require.resolve("@koishijs/plugin-" + name)))
+    )
+      throw new Error("Console plugin must resolve from this artifact");
+    if (
+      name === "server" &&
+      Object.keys(plugins).indexOf(key) > Object.keys(plugins).indexOf(post)
+    )
+      throw new Error(
+        "Console server must precede Post for lifecycle ownership",
+      );
+    const value = plugins[key] as Record<string, unknown>;
+    const allowed =
+      name === "server"
+        ? ["host", "port"]
+        : name === "console"
+          ? ["uiPath", "apiPath", "selfUrl", "open", "devMode"]
+          : [];
+    if (!value || Object.keys(value).some((key) => !allowed.includes(key)))
+      throw new Error("Unsupported Console preview options");
+    if (
+      name === "server" &&
+      (value.host !== "127.0.0.1" ||
+        !Number.isInteger(value.port) ||
+        Number(value.port) < 1 ||
+        Number(value.port) > 65535 ||
+        value.port === cfg.port)
+    )
+      throw new Error("Console requires a separate loopback port");
+    if (
+      name === "console" &&
+      (value.uiPath !== "" ||
+        value.apiPath !== "/status" ||
+        value.selfUrl !== "" ||
+        value.open !== false ||
+        value.devMode !== false)
+    )
+      throw new Error("Console requires native production resources at root");
+  }
 }

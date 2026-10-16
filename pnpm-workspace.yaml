@@ -1,6 +1,8 @@
 strictPeerDependencies: true
 allowBuilds:
   esbuild: true
+  vue-demi: true
+  '@parcel/watcher': false
 packageExtensions:
   '@koishi-ce/plugin-database-sqlite@1.2.2':
     peerDependencies:

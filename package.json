@@ -12,11 +12,15 @@
   "dependencies": {
     "@cordisjs/plugin-http": "0.6.3",
     "@koishi-ce/plugin-database-sqlite": "1.2.2",
+    "@koishijs/client": "5.30.11",
     "@koishijs/core": "4.18.11",
     "@koishijs/loader": "4.6.11",
     "@koishijs/plugin-adapter-qq": "4.14.0",
+    "@koishijs/plugin-console": "5.30.11",
     "@koishijs/plugin-http": "0.6.3",
     "@koishijs/plugin-proxy-agent": "0.3.3",
+    "@koishijs/plugin-server": "3.2.9",
+    "@koishijs/plugin-status": "7.4.10",
     "@minatojs/sql-utils": "5.6.0",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@satorijs/adapter-qq": "4.14.0",
@@ -48,6 +52,7 @@
     "docs",
     "deploy",
     "examples/koishi.yml",
+    "examples/koishi.preview.yml",
     "LICENSE",
     "patches",
     "pnpm-workspace.yaml"

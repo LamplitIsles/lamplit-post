@@ -1,4 +1,5 @@
 import type {} from "@koishijs/loader";
+import type {} from "@koishijs/plugin-server";
 import { Context, Logger, Service as FrameworkService } from "@koishijs/core";
 import SQLite from "@koishi-ce/plugin-database-sqlite";
 import { resolve, join } from "node:path";
@@ -42,9 +43,86 @@ export function postPlugin(options: Options) {
     Config: ConfigSchema,
     apply(ctx: Context, raw: PostConfig) {
       Logger.targets = [];
-      let owner: Ownership;
+      let owner: Ownership | undefined;
+      let store: Store | undefined,
+        domain: Service | undefined,
+        host: Host | undefined,
+        http: Running["http"];
+      let startupTask: Promise<void> | undefined;
+      let stopping = false,
+        workStop: Promise<void> | undefined,
+        stopTask: Promise<void> | undefined;
+      let provider: SQLite | undefined,
+        providerStart: Promise<void> | undefined,
+        providerStop: Promise<void> | undefined;
+      // Server's native disposal initiates closure without awaiting socket I/O.
+      // Retain its listening barrier and actual handles until Post can release ownership.
+      const server = ctx.root.get("server");
+      let finishListening = () => {};
+      const listening =
+        server && !server._http.listening
+          ? new Promise<void>((resolve) => {
+              finishListening = resolve;
+              server._http.once("listening", resolve);
+            })
+          : Promise.resolve();
+      const removeServerError =
+        server &&
+        ctx.root.on("internal/error", function (error) {
+          if (this.scope.runtime.name !== "server") return;
+          // The native server's port-probe failure precedes its HTTP listen call.
+          finishListening();
+          void failStartup(error).catch(() => {});
+        });
+      const stopUI = async () => {
+        if (!server) return;
+        await listening;
+        server._http.removeListener("listening", finishListening);
+        removeServerError?.();
+        for (const layer of [...server.wsStack]) layer.close();
+        for (const socket of server._ws.clients) socket.terminate();
+        await Promise.all([
+          new Promise<void>((resolve) => server._ws.close(() => resolve())),
+          new Promise<void>((resolve) => {
+            server._http.close(() => resolve());
+            server._http.closeAllConnections();
+          }),
+        ]);
+      };
+      const stopWork = () => {
+        stopping = true;
+        return (workStop ??= (async () => {
+          await stopUI();
+          const currentHTTP = http;
+          await currentHTTP?.stop();
+          await domain?.stop();
+          await host?.stop();
+          // Startup retains ownership until every in-flight resource acquisition settles.
+          await startupTask?.catch(() => {});
+          if (http !== currentHTTP) await http?.stop();
+        })());
+      };
+      const stop = () =>
+        (stopTask ??= (async () => {
+          await stopWork();
+          await provider?.stop();
+          owner?.close();
+        })());
+      options.cleanup?.(stop);
+      ctx.on("exit", stop);
+      ctx.on("dispose", stop, true);
+      // Fatal CLI startup must end the application, including sibling status timers.
+      // Loader's explicit failure code avoids its default restart code (51).
+      let failure: Promise<never> | undefined;
+      const failStartup = (error: unknown): Promise<never> =>
+        (failure ??= (async () => {
+          await stop();
+          options.failed?.(error);
+          ctx.root.get("loader")?.fullReload(1);
+          throw error;
+        })());
       try {
-        const base = ctx.baseDir ?? process.cwd();
+        const base = ctx.root.get("loader")?.baseDir ?? process.cwd();
         const config = {
           ...raw,
           data_dir: resolve(base, raw.data_dir),
@@ -52,38 +130,6 @@ export function postPlugin(options: Options) {
         };
         owner = new Ownership(config);
         models(ctx);
-        let store: Store | undefined,
-          domain: Service | undefined,
-          host: Host | undefined,
-          http: Running["http"];
-        let startupTask: Promise<void> | undefined;
-        let stopping = false,
-          workStop: Promise<void> | undefined,
-          stopTask: Promise<void> | undefined;
-        let provider: PostSQLite | undefined,
-          providerStart: Promise<void> | undefined,
-          providerStop: Promise<void> | undefined;
-        const stopWork = () => {
-          stopping = true;
-          return (workStop ??= (async () => {
-            const currentHTTP = http;
-            await currentHTTP?.stop();
-            await domain?.stop();
-            await host?.stop();
-            // Startup retains ownership until every in-flight resource acquisition settles.
-            await startupTask?.catch(() => {});
-            if (http !== currentHTTP) await http?.stop();
-          })());
-        };
-        const stop = () =>
-          (stopTask ??= (async () => {
-            await stopWork();
-            await provider?.stop();
-            owner.close();
-          })());
-        options.cleanup?.(stop);
-        ctx.on("exit", stop);
-        ctx.on("dispose", stop, true);
         // Public provider hooks keep schema identification and actual I/O cleanup under one owner.
         class PostSQLite extends SQLite {
           async start() {
@@ -91,16 +137,12 @@ export function postPlugin(options: Options) {
             provider = this;
             providerStart = (async () => {
               await super.start();
-              if (owner.fresh)
+              if (owner!.fresh)
                 this.db.exec(
                   "PRAGMA application_id=1347375956; PRAGMA user_version=1;",
                 );
             })();
-            return providerStart.catch(async (error) => {
-              await stop();
-              options.failed?.(error);
-              throw error;
-            });
+            return providerStart.catch(failStartup);
           }
           async stop() {
             return (providerStop ??= (async () => {
@@ -118,7 +160,7 @@ export function postPlugin(options: Options) {
               store = new Store(
                 config,
                 injected.database as unknown as PostDatabase,
-                owner,
+                owner!,
               );
               store.close = async () => {
                 await stop();
@@ -131,6 +173,8 @@ export function postPlugin(options: Options) {
               if (stopping) throw new Error("Post stopped during startup");
               new Post(injected, store, domain);
               if (options.connect) {
+                await listening;
+                if (stopping) throw new Error("Post stopped during startup");
                 host = new Host(domain, options.fixture, ctx.root);
                 await host.start();
                 if (stopping) throw new Error("Post stopped during startup");
@@ -161,16 +205,11 @@ export function postPlugin(options: Options) {
                   }),
                 );
             })();
-            return startupTask.catch(async (error) => {
-              await stop();
-              options.failed?.(error);
-              throw error;
-            });
+            return startupTask.catch(failStartup);
           });
         });
       } catch (error) {
-        options.failed?.(error);
-        throw error;
+        return failStartup(error);
       }
     },
   };
