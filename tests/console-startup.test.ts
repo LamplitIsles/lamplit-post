@@ -15,9 +15,15 @@ import { createServer, connect } from "node:net";
 import { once } from "node:events";
 import { execFileSync } from "node:child_process";
 import { parse, stringify } from "yaml";
+import { createRequire } from "node:module";
+import { httpFixture } from "./fixtures/http";
 import { processFixture } from "./fixtures/process";
 let root: string, artifact: string, template: string;
+let registry: Awaited<ReturnType<typeof httpFixture>>;
 beforeAll(async () => {
+  registry = await httpFixture(() =>
+    Response.json({ objects: [], total: 0, version: 1, versions: {} }),
+  );
   root = await mkdtemp(join(tmpdir(), "post-console-startup-"));
   artifact = join(root, "release");
   await mkdir(artifact);
@@ -27,12 +33,10 @@ beforeAll(async () => {
     "-C",
     artifact,
   ]);
-  template = await readFile(
-    join(artifact, "examples/koishi.preview.yml"),
-    "utf8",
-  );
+  template = await readFile(join(artifact, "koishi.yml"), "utf8");
 });
 afterAll(async () => {
+  await registry.stop();
   await rm(root, { recursive: true, force: true });
 });
 async function port() {
@@ -60,15 +64,27 @@ async function fixture(name: string, relative = false) {
     home = join(parent, "home");
   await mkdir(parent, { mode: 0o700 });
   await mkdir(home, { mode: 0o700 });
-  const document = parse(
-    template.replaceAll("__POST_ARTIFACT_ROOT__", artifact),
-  );
-  const post = Object.keys(document.plugins).find((k) =>
-    k.endsWith("post-plugin.cjs"),
-  )!;
-  const server = Object.keys(document.plugins).find((k) =>
-    k.includes("plugin-server/"),
-  )!;
+  const document = parse(template);
+  document.plugins.market.registry = {
+    endpoint: `http://127.0.0.1:${registry.port}`,
+    timeout: 100,
+  };
+  // These startup/ownership fixtures intentionally place config outside resources.
+  // The complete single-root native-name contract is exercised by managed.test.
+  const require = createRequire(join(artifact, "package.json"));
+  const entries = Object.entries(document.plugins).map(([name, value]) => [
+    name === "post"
+      ? join(artifact, "post/dist/post-plugin.cjs")
+      : require.resolve(
+          name === "theme-vanilla"
+            ? "koishi-plugin-theme-vanilla"
+            : "@koishijs/plugin-" + name,
+        ),
+    value,
+  ]);
+  document.plugins = Object.fromEntries(entries);
+  const post = join(artifact, "post/dist/post-plugin.cjs");
+  const server = require.resolve("@koishijs/plugin-server");
   const ui = await port(),
     api = await port();
   document.plugins[server].port = ui;
@@ -129,7 +145,7 @@ async function fixture(name: string, relative = false) {
   };
 }
 test.each(["legacy-listener", "nested-console"])(
-  "preview preflight rejects %s without state",
+  "preflight handles %s without state",
   async (kind) => {
     const f = await fixture(kind);
     if (kind === "legacy-listener")
@@ -143,7 +159,7 @@ test.each(["legacy-listener", "nested-console"])(
         Object.entries(f.document.plugins).filter(([k]) => k !== f.post),
       );
       f.document.plugins = {
-        "group:preview": { ...children, config: {} },
+        "group:native": { ...children, config: {} },
         [f.post]: {
           ...f.document.plugins[f.post],
           accounts: [
@@ -160,7 +176,9 @@ test.each(["legacy-listener", "nested-console"])(
     await f.write();
     const before = await readFile(f.path),
       listing = await readdir(f.parent);
-    expect((await f.run("config-check")).code).toBe(1);
+    expect((await f.run("config-check")).code).toBe(
+      kind === "legacy-listener" ? 1 : 0,
+    );
     expect((await readFile(f.path)).equals(before)).toBe(true);
     expect(await readdir(f.parent)).toEqual(listing);
     expect(await open(f.ui)).toBe(false);

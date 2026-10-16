@@ -1,9 +1,9 @@
-# Adjust the plugin artifact path for the selected installation.
+# Full-account example for an initialized native app; replace verified identities.
 # Other paths resolve relative to this file. References only; never secrets.
 daemon:
   autoRestart: false
 plugins:
-  /opt/lamplit-post/dist/post-plugin.cjs:
+  post:
     data_dir: /var/lib/lamplit-post
     master_key_file: /etc/lamplit-post/keys/post.key
     hostname: 127.0.0.1

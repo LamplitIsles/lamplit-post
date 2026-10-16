@@ -29,6 +29,7 @@ import { ConfigSchema } from "../src/config";
 import { postPlugin, type Running } from "../src/runtime";
 import { processFixture } from "./fixtures/process";
 import { until } from "./fixtures/state";
+import { httpFixture } from "./fixtures/http";
 
 async function port() {
   const s = createServer();
@@ -108,35 +109,35 @@ test("one native root exposes only ping RPC and empty status, then closes UI/WS 
   }
 });
 
-test("canonical extracted preview validates without state, serves native shell/assets and status data, and denies privileged RPC/MCP through restart", async () => {
+test("canonical extracted managed app validates without state, serves native shell/assets and status data, and denies privileged RPC/MCP through restart", async () => {
   const dir = await mkdtemp(join(tmpdir(), "post-console-artifact-"));
   let child: ReturnType<typeof processFixture> | undefined;
   let socket: WebSocket | undefined;
   let phase = "materialize";
+  let registry: Awaited<ReturnType<typeof httpFixture>> | undefined;
   try {
     const home = join(dir, "home"),
-      root = join(home, "releases/exact-artifact"),
-      configDir = join(home, "private-preview");
+      root = join(home, "app"),
+      configDir = root;
     await mkdir(root, { recursive: true });
-    await mkdir(configDir, { mode: 0o700 });
+    await mkdir(configDir, { mode: 0o700, recursive: true });
     execFileSync("tar", [
       "-xzf",
       resolve("dist/lamplit-post-node24.tar.gz"),
       "-C",
       root,
     ]);
-    const template = await readFile(
-      join(root, "examples/koishi.preview.yml"),
-      "utf8",
+    const template = await readFile(join(root, "koishi.yml"), "utf8");
+    const document = parse(template);
+    registry = await httpFixture(() =>
+      Response.json({ objects: [], total: 0, version: 1, versions: {} }),
     );
-    const marker = "__POST_ARTIFACT_ROOT__";
-    expect(template.split(marker).length - 1).toBe(4);
-    const materialized = template.replaceAll(marker, root);
-    expect(materialized).not.toContain(marker);
-    const document = parse(materialized);
-    const keys = Object.keys(document.plugins),
-      post = keys.find((k) => k.endsWith("post-plugin.cjs"))!,
-      server = keys.find((k) => k.endsWith("plugin-server/index.cjs"))!;
+    document.plugins.market.registry = {
+      endpoint: `http://127.0.0.1:${registry.port}`,
+      timeout: 100,
+    };
+    const post = "post",
+      server = "server";
     expect(document.plugins[post].port).toBe(18787);
     expect(document.plugins[server].port).toBe(5140);
     const ui = await port(),
@@ -181,27 +182,16 @@ test("canonical extracted preview validates without state, serves native shell/a
     expect((await run(["--help"])).code).toBe(0);
     expect((await run(["config-check", "--config", config])).code).toBe(0);
     expect(await readFile(config)).toEqual(initial);
-    expect(await readdir(configDir)).toEqual(["koishi.yml"]);
-    const consoleKey = keys.find((k) => k.includes("plugin-console/"))!;
+    await expect(access(join(configDir, "data"))).rejects.toThrow();
     for (const mutate of [
       () => {
         document.plugins[server].host = "0.0.0.0";
       },
       () => {
-        document.plugins[consoleKey].devMode = true;
+        document.plugins[server].port = api;
       },
       () => {
-        document.plugins[post].accounts = [
-          { id: "a", platform: "qq", credential: "qq", native_id: "app" },
-        ];
-      },
-      () => {
-        document.plugins["config"] = {};
-      },
-      () => {
-        const serverConfig = document.plugins[server];
-        delete document.plugins[server];
-        document.plugins[server] = serverConfig;
+        document.plugins.auth.admin.enabled = true;
       },
     ]) {
       const previous = stringify(document);
@@ -243,10 +233,14 @@ test("canonical extracted preview validates without state, serves native shell/a
     }
     const ws = channel(`ws://127.0.0.1:${ui}/status`);
     socket = ws.socket;
-    await until(() => ws.messages.some((m) => m.body?.key === "status"));
+    await until(
+      () =>
+        ws.messages.some((m) => m.body?.key === "status") &&
+        ws.messages.some((m) => m.body?.key === "entry" && m.body.value),
+    );
     expect(
-      ws.messages.find((m) => m.body?.key === "status").body.value.bots,
-    ).toEqual({});
+      ws.messages.find((m) => m.body?.key === "status").body.value,
+    ).toBeNull();
     const entry = ws.messages.find((m) => m.body?.key === "entry").body.value;
     for (const { files } of Object.values(entry).filter(
       (v) => typeof v === "object",
@@ -277,12 +271,19 @@ test("canonical extracted preview validates without state, serves native shell/a
       "console/listeners",
       "eval",
     ]) {
-      expect((await call(rpc)).error).toBe("not implemented");
+      expect((await call(rpc)).error).toBe(
+        ["manager/reload", "manager/unload", "market/install"].includes(rpc)
+          ? "unauthorized"
+          : "not implemented",
+      );
     }
     for (const path of ["/mcp", "/assets/missing"])
       expect((await fetch(`http://127.0.0.1:${api}${path}`)).status).toBe(401);
     phase = "MCP denial";
-    const client = new Client({ name: "empty-preview-denied", version: "1" });
+    const client = new Client({
+      name: "unauthenticated-app-denied",
+      version: "1",
+    });
     try {
       await expect(
         client.connect(
@@ -333,13 +334,14 @@ test("canonical extracted preview validates without state, serves native shell/a
     }
   } catch (error) {
     throw new Error(
-      `Preview phase ${phase}: ${String(error)}; stdout=${child?.out ?? ""}; stderr=${child?.err ?? ""}`,
+      `Managed app phase ${phase}: ${String(error)}; stdout=${child?.out ?? ""}; stderr=${child?.err ?? ""}`,
       { cause: error },
     );
   } finally {
     socket?.terminate();
     child?.kill("SIGKILL");
     if (child) await child.exited;
+    await registry?.stop();
     await rm(dir, { recursive: true, force: true });
   }
 }, 30000);

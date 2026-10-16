@@ -29,7 +29,7 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     artifactRoot,
   ]);
   const artifact = join(artifactRoot, "dist/cli.cjs"),
-    plugin = join(artifactRoot, "dist/post-plugin.cjs");
+    plugin = join(artifactRoot, "post/dist/post-plugin.cjs");
   const home = join(s.dir, "home");
   await mkdir(home);
   const preload = join(s.dir, "network-preload.mjs");
@@ -46,6 +46,8 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     processFixture([artifact, ...args], { cwd: s.dir, env, input }).exited;
   let serving: ReturnType<typeof processFixture> | undefined;
   let client: Client | undefined;
+  let stage = "preflight";
+  let pendingOutcome: unknown;
   const connect = async (url: string, token: string) => {
     const c = new Client({ name: "artifact-probe", version: "1" });
     await c.connect(
@@ -82,6 +84,15 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     await write({ ...config, data_dir: "${{ env.POST_DATA }}" });
     expect((await run(["config-check", "--config", path])).code).toBe(1);
     await write(config);
+    await expect(access(config.data_dir)).rejects.toBeDefined();
+    expect(
+      (
+        await processFixture([artifact, "serve", "--config", path], {
+          cwd: s.dir,
+          env: { ...env, npm_config_user_agent: "npm/11.0.0" },
+        }).exited
+      ).code,
+    ).toBe(1);
     await expect(access(config.data_dir)).rejects.toBeDefined();
     for (const args of [
       ["serve", "--config", path, "--typo", "yes"],
@@ -179,8 +190,10 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     });
     let ready = await serving.ready();
     expect((await run(["status", "--config", path])).code).toBe(1);
+    stage = "initial MCP connect";
     client = await connect(ready.url, token);
     expect((await client.listTools()).tools).toHaveLength(7);
+    stage = "asset upload";
     const upload = await fetch(ready.url + "/assets", {
       method: "POST",
       headers: {
@@ -191,6 +204,7 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     });
     expect(upload.status).toBe(201);
     const asset = (await upload.json()) as any;
+    stage = "asset download";
     expect(
       await (
         await fetch(ready.url + asset.download_path, {
@@ -198,6 +212,7 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
         })
       ).text(),
     ).toBe("artifact bytes");
+    stage = "durable send before crash";
     p.stall();
     const args = {
       account_id: "matrix-main",
@@ -207,7 +222,14 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     };
     const pending = client
       .callTool({ name: "send_message", arguments: args })
-      .catch((e) => e);
+      .then((result) => {
+        pendingOutcome = result;
+        return result;
+      })
+      .catch((error) => {
+        pendingOutcome = { name: error.name, message: error.message };
+        return error;
+      });
     await until(() => p.sendCount === 1);
     serving.kill("SIGKILL");
     const crashed = await serving.exited;
@@ -224,7 +246,9 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
       env,
     });
     ready = await serving.ready();
+    stage = "MCP reconnect after crash";
     client = await connect(ready.url, token);
+    stage = "unknown send reconciliation";
     const result = await client.callTool({
       name: "send_message",
       arguments: args,
@@ -256,6 +280,19 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     const bytes = await readFile(join(config.data_dir, "post.sqlite"));
     expect(bytes.includes(Buffer.from("secret-via-stdin"))).toBe(false);
     expect(bytes.includes(Buffer.from(token))).toBe(false);
+  } catch (error) {
+    console.error(
+      "Owned artifact failure diagnostic",
+      JSON.stringify({
+        stage,
+        pendingOutcome,
+        platformPaths: p.calls.map((call) => call.path),
+        sends: p.sendCount,
+        output: serving?.out,
+        errors: serving?.err,
+      }),
+    );
+    throw error;
   } finally {
     await client?.close();
     serving?.kill("SIGKILL");
@@ -286,7 +323,7 @@ test("official CLI exits nonzero and releases ownership on provider startup reje
     config,
     stringify({
       daemon: { autoRestart: false },
-      plugins: { [join(artifact, "dist/post-plugin.cjs")]: fresh },
+      plugins: { [join(artifact, "post/dist/post-plugin.cjs")]: fresh },
     }),
     { mode: 0o600 },
   );

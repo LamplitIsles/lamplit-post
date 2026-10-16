@@ -16,8 +16,14 @@
     "@koishijs/core": "4.18.11",
     "@koishijs/loader": "4.6.11",
     "@koishijs/plugin-adapter-qq": "4.14.0",
+    "@koishijs/plugin-analytics": "2.0.6",
+    "@koishijs/plugin-auth": "4.1.7",
+    "@koishijs/plugin-config": "2.8.7",
     "@koishijs/plugin-console": "5.30.11",
     "@koishijs/plugin-http": "0.6.3",
+    "@koishijs/plugin-insight": "3.5.2",
+    "@koishijs/plugin-logger": "2.6.9",
+    "@koishijs/plugin-market": "2.11.12",
     "@koishijs/plugin-proxy-agent": "0.3.3",
     "@koishijs/plugin-server": "3.2.9",
     "@koishijs/plugin-status": "7.4.10",
@@ -28,6 +34,7 @@
     "cosmokit": "1.8.1",
     "file-type": "^22.2.0",
     "koishi": "4.18.11",
+    "koishi-plugin-theme-vanilla": "1.1.0",
     "matrix-js-sdk": "^44.0.0",
     "minato": "3.7.0",
     "ws": "^8.22.0",
@@ -52,9 +59,9 @@
     "docs",
     "deploy",
     "examples/koishi.yml",
-    "examples/koishi.preview.yml",
     "LICENSE",
     "patches",
-    "pnpm-workspace.yaml"
+    "pnpm-workspace.yaml",
+    "examples/koishi.managed.yml"
   ]
 }

@@ -5,6 +5,7 @@ import { fileTypeFromBuffer } from "file-type";
 import { loadConfig, privateFile } from "./config";
 import { $ } from "minato";
 import { Store } from "./store";
+import { provisionAdmin } from "./admin";
 const help = `Lamplit Post v1 (Node 24)
 post <command> --config FILE
   config-check      Validate one Koishi YAML Post entry without creating state
@@ -12,6 +13,7 @@ post <command> --config FILE
                     Read secret from stdin; store authenticated ciphertext offline
   token-issue --agent ID    Print one new machine-agent token, replacing previous token
   token-revoke --agent ID   Revoke machine-agent token offline
+  admin-provision --file FILE  Deliver first native admin secret to a new private file
   status            Inspect safe offline state; refuses serving lock
   serve             Use the Koishi CLI supervisor until process-group SIGINT/SIGTERM
 post asset-upload --url BASE --file FILE
@@ -39,6 +41,7 @@ export async function main(argv = process.argv.slice(2)) {
     "config-check": ["config"],
     serve: ["config"],
     status: ["config"],
+    "admin-provision": ["config", "file"],
     "credential-put": ["config", "ref", "account", "kind"],
     "token-issue": ["config", "agent"],
     "token-revoke": ["config", "agent"],
@@ -91,6 +94,8 @@ export async function main(argv = process.argv.slice(2)) {
     (!v.ref || !v.account || !["platform", "receiver"].includes(v.kind ?? ""))
   )
     throw new Error("Credential fields required");
+  if (command === "admin-provision" && !v.file)
+    throw new Error("Bootstrap file required");
   const config = await loadConfig(v.config);
   if (v.agent && !config.bindings.some((b) => b.agent_id === v.agent))
     throw new Error("Agent not configured");
@@ -99,8 +104,18 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (command === "serve") {
+    const manager = (process.env.npm_config_user_agent ?? "").match(
+      /^pnpm\/(\d+)\.(\d+)\.(\d+)(?:\s|$)/,
+    );
+    if (
+      !manager ||
+      +manager[1] !== 12 ||
+      +manager[2] < 3 ||
+      (+manager[2] === 3 && +manager[3] < 4)
+    )
+      throw new Error("Start with pnpm >=12.3.4 <13 run start");
     const configPath = resolve(v.config);
-    process.chdir(resolve(dirname(process.argv[1]), ".."));
+    process.chdir(dirname(configPath));
     process.umask(0o077);
     process.argv = [process.execPath, "koishi", "start", configPath];
     await import("koishi/lib/cli");
@@ -129,7 +144,9 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const store = await Store.open(config);
   try {
-    if (command === "credential-put") {
+    if (command === "admin-provision") {
+      console.log(JSON.stringify(await provisionAdmin(store, v.file!)));
+    } else if (command === "credential-put") {
       await store.putSecret(v.ref!, v.account!, v.kind!, secret);
       console.log(JSON.stringify({ saved: true }));
     } else if (command === "token-issue")

@@ -1,0 +1,290 @@
+diff --git a/lib/file.d.ts b/lib/file.d.ts
+index 5c46139d619998d7ebe77c87cc8945de383ea570..9b3563092b8fc6a88a416604177cb5b7f24d5178 100644
+--- a/lib/file.d.ts
++++ b/lib/file.d.ts
+@@ -7,6 +7,8 @@ export declare class FileWriter {
+     task: Promise<FileHandle>;
+     size: number;
+     private temp;
++    private closing;
++    private closeTask;
+     constructor(date: string, path: string);
+     flush(): void;
+     parse(text: string): any[];
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index 6672f1fb0aec3e79f1479ec3ae52ad252fd672c6..dd068c09bc7580ecf825e74ee7ccf8de292af02b 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -1,3 +1,8 @@
++declare module 'koishi' {
++  interface Events {
++    'logger/close'(): Promise<void>;
++  }
++}
+ import { Context, Logger, Schema } from 'koishi';
+ declare module '@koishijs/console' {
+     namespace Console {
+diff --git a/lib/index.js b/lib/index.js
+index 0d94e02ffef327dd8494e0bf05c8149fd02260e5..6f201af9d8663046deb9118f06b5eb498a90c3ea 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -52,8 +52,10 @@ var FileWriter = class {
+   task;
+   size;
+   temp = [];
++  closing = false;
++  closeTask;
+   flush() {
+-    if (!this.temp.length) return;
++    if (this.closing || !this.temp.length) return;
+     this.task = this.task.then(async (handle) => {
+       const content = import_buffer.Buffer.from(this.temp.map((record) => JSON.stringify(record) + "\n").join(""));
+       this.data.push(...this.temp);
+@@ -76,12 +78,15 @@ var FileWriter = class {
+     return this.data;
+   }
+   write(record) {
++    if (this.closing) throw new Error("Log writer closed");
+     this.temp.push(record);
+     this.flush();
+   }
+-  async close() {
+-    const handle = await this.task;
+-    await handle.close();
++  close() {
++    if (this.closeTask) return this.closeTask;
++    this.flush();
++    this.closing = true;
++    return this.closeTask = this.task.then(handle => handle.close());
+   }
+ };
+ 
+@@ -124,6 +129,17 @@ var Config = import_koishi.Schema.object({
+   "zh-CN": zh_CN_default
+ });
+ async function apply(ctx, config) {
++  let initialized;
++  const ready = new Promise(resolve => initialized = resolve);
++  let close = () => Promise.resolve();
++  ctx.on("logger/close", async () => { await ready; await close(); });
++  try {
++    await initialize(ctx, config, callback => close = callback);
++  } finally {
++    initialized();
++  }
++}
++async function initialize(ctx, config, setClose) {
+   const root = (0, import_path.resolve)(ctx.baseDir, config.root);
+   await (0, import_promises2.mkdir)(root, { recursive: true });
+   const files = {};
+@@ -133,6 +149,11 @@ async function apply(ctx, config) {
+     files[capture[1]] ??= [];
+     files[capture[1]].push(+capture[2]);
+   }
++  const pending = new Set();
++  function track(task) {
++    pending.add(task);
++    task.finally(() => pending.delete(task)).catch(() => {});
++  }
+   let writer;
+   async function createFile(date2, index) {
+     writer = new FileWriter(date2, `${root}/${date2}-${index}.log`);
+@@ -151,7 +172,7 @@ async function apply(ctx, config) {
+   }
+   __name(createFile, "createFile");
+   const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+-  createFile(date, Math.max(...files[date] ?? [0]) + 1);
++  track(createFile(date, Math.max(...files[date] ?? [0]) + 1));
+   let buffer = [];
+   const update = ctx.throttle(() => {
+     ctx.get("console")?.patch("logs", buffer);
+@@ -168,30 +189,34 @@ async function apply(ctx, config) {
+       }
+       const date2 = new Date(record.timestamp).toISOString().slice(0, 10);
+       if (writer.date !== date2) {
+-        writer.close();
++        track(writer.close());
+         files[date2] = [1];
+-        createFile(date2, 1);
++        track(createFile(date2, 1));
+       }
+       writer.write(record);
+       buffer.push(record);
+       update();
+       if (writer.size >= config.maxSize) {
+-        writer.close();
++        track(writer.close());
+         const index = Math.max(...files[date2] ?? [0]) + 1;
+         files[date2] ??= [];
+         files[date2].push(index);
+-        createFile(date2, index);
++        track(createFile(date2, index));
+       }
+     }, "record")
+   };
+   import_koishi.Logger.targets.push(target);
+-  ctx.on("dispose", () => {
+-    writer?.close();
++  let closeTask;
++  const close = () => {
+     (0, import_koishi.remove)(import_koishi.Logger.targets, target);
+-    if (loader) {
+-      loader.prolog = [];
+-    }
+-  });
++    if (loader) loader.prolog = [];
++    return closeTask ||= (async () => {
++      await Promise.all(pending);
++      await writer?.close();
++    })();
++  };
++  ctx.on("dispose", close);
++  setClose(close);
+   for (const record of loader?.prolog || []) {
+     target.record(record);
+   }
+diff --git a/src/file.ts b/src/file.ts
+index 287f144af291f8a0ab7a3e38b8a2c704d3cfcd97..da4f426c9567a3ec937d3e92f57ff0c6da940498 100644
+--- a/src/file.ts
++++ b/src/file.ts
+@@ -8,6 +8,8 @@ export class FileWriter {
+   public size: number
+ 
+   private temp: Logger.Record[] = []
++  private closing = false
++  private closeTask?: Promise<void>
+ 
+   constructor(public date: string, public path: string) {
+     this.task = open(path, 'a+').then(async (handle) => {
+@@ -20,7 +22,7 @@ export class FileWriter {
+   }
+ 
+   flush() {
+-    if (!this.temp.length) return
++    if (this.closing || !this.temp.length) return
+     this.task = this.task.then(async (handle) => {
+       const content = Buffer.from(this.temp.map((record) => JSON.stringify(record) + '\n').join(''))
+       this.data.push(...this.temp)
+@@ -45,12 +47,15 @@ export class FileWriter {
+   }
+ 
+   write(record: Logger.Record) {
++    if (this.closing) throw new Error('Log writer closed')
+     this.temp.push(record)
+     this.flush()
+   }
+ 
+-  async close() {
+-    const handle = await this.task
+-    await handle.close()
++  close() {
++    if (this.closeTask) return this.closeTask
++    this.flush()
++    this.closing = true
++    return this.closeTask = this.task.then(handle => handle.close())
+   }
+ }
+diff --git a/src/index.ts b/src/index.ts
+index 5e899f9ad3805f715e3da14cb60360b939b680e8..7c6309075b01a6e4db970d7a268de0d37913435e 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -5,6 +5,12 @@ import { mkdir, readdir, rm } from 'fs/promises'
+ import { FileWriter } from './file'
+ import zhCN from './locales/zh-CN.yml'
+ 
++declare module 'koishi' {
++  interface Events {
++    'logger/close'(): Promise<void>
++  }
++}
++
+ declare module '@koishijs/console' {
+   namespace Console {
+     interface Services {
+@@ -54,6 +60,18 @@ export const Config: Schema<Config> = Schema.object({
+ })
+ 
+ export async function apply(ctx: Context, config: Config) {
++  let initialized!: () => void
++  const ready = new Promise<void>(resolve => initialized = resolve)
++  let close = () => Promise.resolve()
++  ctx.on('logger/close', async () => { await ready; await close() })
++  try {
++    await initialize(ctx, config, callback => close = callback)
++  } finally {
++    initialized()
++  }
++}
++
++async function initialize(ctx: Context, config: Config, setClose: (callback: () => Promise<void>) => void) {
+   const root = resolve(ctx.baseDir, config.root)
+   await mkdir(root, { recursive: true })
+ 
+@@ -65,6 +83,11 @@ export async function apply(ctx: Context, config: Config) {
+     files[capture[1]].push(+capture[2])
+   }
+ 
++  const pending = new Set<Promise<unknown>>()
++  function track(task: Promise<unknown>) {
++    pending.add(task)
++    task.finally(() => pending.delete(task)).catch(() => {})
++  }
+   let writer: FileWriter
+   async function createFile(date: string, index: number) {
+     writer = new FileWriter(date, `${root}/${date}-${index}.log`)
+@@ -85,7 +108,7 @@ export async function apply(ctx: Context, config: Config) {
+   }
+ 
+   const date = new Date().toISOString().slice(0, 10)
+-  createFile(date, Math.max(...files[date] ?? [0]) + 1)
++  track(createFile(date, Math.max(...files[date] ?? [0]) + 1))
+ 
+   let buffer: Logger.Record[] = []
+   const update = ctx.throttle(() => {
+@@ -106,31 +129,36 @@ export async function apply(ctx: Context, config: Config) {
+       }
+       const date = new Date(record.timestamp).toISOString().slice(0, 10)
+       if (writer.date !== date) {
+-        writer.close()
++        track(writer.close())
+         files[date] = [1]
+-        createFile(date, 1)
++        track(createFile(date, 1))
+       }
+       writer.write(record)
+       buffer.push(record)
+       update()
+       if (writer.size >= config.maxSize) {
+-        writer.close()
++        track(writer.close())
+         const index = Math.max(...files[date] ?? [0]) + 1
+         files[date] ??= []
+         files[date].push(index)
+-        createFile(date, index)
++        track(createFile(date, index))
+       }
+     },
+   }
+ 
+   Logger.targets.push(target)
+-  ctx.on('dispose', () => {
+-    writer?.close()
++  let closeTask: Promise<void>
++  const close = () => {
+     remove(Logger.targets, target)
+-    if (loader) {
+-      loader.prolog = []
+-    }
+-  })
++    if (loader) loader.prolog = []
++    return closeTask ||= (async () => {
++      await Promise.all(pending)
++      await writer?.close()
++    })()
++  }
++  ctx.on('dispose', close)
++  setClose(close)
++
+ 
+   for (const record of loader?.prolog || []) {
+     target.record(record)

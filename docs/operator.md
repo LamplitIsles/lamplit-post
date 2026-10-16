@@ -4,41 +4,46 @@ Post runs a Node 24 Koishi CLI supervisor and one worker application on loopback
 
 ## Artifact and private paths
 
-Run `pnpm install --frozen-lockfile`, `pnpm run typecheck`, `pnpm test`, `pnpm run build`, and `pnpm run package`. `dist/node-artifact` and `dist/lamplit-post-node24.tar.gz` contain the Node CLI/plugin, complete framework dependencies/resources, license, canonical full-account and empty-preview YAML examples, service template and this guide. Supply Node 24 for the target architecture and retain `revision.json`. Build/test/package require no Bun. The [provider policy](framework-persistence.md) records the exact compatibility metadata, dependency patch, native sync evidence and its limits.
+Build with Node24 and the committed pnpm lockfile. The complete writable app seed is
+`dist/lamplit-post-node24.tar.gz`; follow [native managed Console](native-managed-console.md)
+for its one-time extraction, required pnpm startup, first human administrator,
+management pages, narrow dependency repairs and update/rollback procedure.
+Default app root is `~/.local/share/lamplit-post/app`. The app owns one manifest,
+lockfile, YAML and module tree; native Market/Config mutate them normally.
 
-Choose explicit target paths, e.g. `/opt/lamplit-post` for the artifact, `/etc/lamplit-post/koishi.yml` for non-secret configuration, `/etc/lamplit-post/keys/post.key` for the external key, and `/var/lib/lamplit-post` for SQLite/media. Create parent directories for the chosen service user with mode 0700. Set config mode 0600 (at minimum it must not be writable by group/others). Data and generated-key parent directories must be private. The data directory is single-owner; the key is separate from it and must be exactly 32 bytes, mode 0600. Paths in the Post YAML entry resolve relative to the config file, not current working directory.
+Keep app/config/data/key parents private (0700) and YAML0600. The sole YAML's
+relative paths resolve from the app root; key stays outside SQLite data. The
+normal seed is `examples/koishi.managed.yml`; `examples/koishi.yml` shows populated
+account/binding fields. Verify all native IDs/homeserver/receiver routes before
+connecting. QQ IDs are App-scoped. Private scopes require explicit native peer
+allowlists; empty lists deny. Matrix private-room sends recheck all joined peers.
+Agent execution sessions stay with the consumer, independently of IM routing.
 
-Keep the root setting `daemon.autoRestart: false`: the target service manager owns restart, so a failed startup exits with failure instead of silently looping. The single Post plugin entry key points to the selected artifact’s absolute `dist/post-plugin.cjs` path. The published loader 4.6.11 writes `koishi.yml.tmp` in the configuration parent and renames it over `koishi.yml` during startup, even before plugin startup. The service user must own and be able to write the chosen config parent and file; the template grants `/etc/lamplit-post` in `ReadWritePaths` for this atomic write and its private key subdirectory. Keep that parent mode 0700 and config mode 0600, with no unrelated files there. Adjust the writable config-parent path together with `--config` when installing under another path. The standard loader may add its normal plugin identity suffix and rewrite formatting during serving; config-check never starts it or writes back. Use literal Post values; inline Koishi interpolation is refused so offline validation/provisioning and serving resolve identical configuration. Select the configuration path through the CLI. Restart Post coherently for account, scope, wake or receiver changes. Copy the example and replace every native ID, homeserver and receiver route from operator-verified values. `conversation_id` is an explicit stable Post identifier; `native_id` is the actual platform destination. The same account/native conversation cannot acquire another Post ID. IDs must not be reused for a different account/native identity. QQ IDs are App-scoped. Binding scopes admit exact groups/rooms; private messages additionally require exact native sender allowlists. Empty private sender lists deny. Matrix private-room sends require every other joined participant to be allowlisted. Define literal aliases explicitly; nicknames/textual @names are not native mentions.
-
-Validate without creating state:
+Read-only validation/help from app root:
 
 ```sh
-node /opt/lamplit-post/dist/cli.cjs config-check --config /etc/lamplit-post/koishi.yml
-node /opt/lamplit-post/dist/cli.cjs --help
+pnpm run config-check
+node dist/cli.cjs --help
 ```
 
 First state initialization (including offline credential provisioning) obtains exclusive ownership and automatically creates the configured external key **only if state is fresh**. It publishes a cryptographically random private key atomically and fsyncs the file/parent before sealing credentials. Repeat invocations reuse identical bytes. An already supplied private 32-byte key is accepted. No implicit overwrite or rotation occurs. Missing key with existing state, malformed key, wrong key, unreadable key or failed vault authentication stops initialization. Restore the original key; never create a replacement for an existing vault. `--help` and invalid config have no initialization side effects.
-
-## Empty native Console preview
-
-Use [the preview guide](native-console-preview.md) and its single canonical template to view the original Koishi shell/status without IM accounts. Console binds 127.0.0.1:5140; that template explicitly selects Post API 127.0.0.1:18787 to preserve the existing host listener on 8787. Ordinary Post defaults stay unchanged. This unauthenticated preview is restricted to empty accounts/bindings and native read-only modules; use fresh private state, issue no credentials/tokens, and keep ingress VPN-only. Activation belongs to Orc after the Post and ko PRs are reviewed/merged. Account/consumer cutover remains paused.
 
 ## Offline provisioning and rotation
 
 Stop the serving instance before any offline operation. Every state-opening CLI command refuses a serving directory lock. Use a private stdin pipe, not a literal secret in argv, shell history, Koishi YAML or a log. The following reads already prepared private files; choose test-owned paths when rehearsing:
 
 ```sh
-node /opt/lamplit-post/dist/cli.cjs credential-put --config /etc/lamplit-post/koishi.yml --ref qq-platform --account qq-main --kind platform < /private/qq-app-secret
-node /opt/lamplit-post/dist/cli.cjs credential-put --config /etc/lamplit-post/koishi.yml --ref matrix-platform --account matrix-main --kind platform < /private/matrix-access-token
-node /opt/lamplit-post/dist/cli.cjs credential-put --config /etc/lamplit-post/koishi.yml --ref partner-receiver --account partner --kind receiver < /private/receiver-bearer
-node /opt/lamplit-post/dist/cli.cjs token-issue --config /etc/lamplit-post/koishi.yml --agent cfl > /private/post-agent-token
+node dist/cli.cjs credential-put --config koishi.yml --ref qq-platform --account qq-main --kind platform < /private/qq-app-secret
+node dist/cli.cjs credential-put --config koishi.yml --ref matrix-platform --account matrix-main --kind platform < /private/matrix-access-token
+node dist/cli.cjs credential-put --config koishi.yml --ref partner-receiver --account partner --kind receiver < /private/receiver-bearer
+node dist/cli.cjs token-issue --config koishi.yml --agent cfl > /private/post-agent-token
 ```
 
 Use `umask 077` before preparing token files. token-issue prints the new token once and replaces the old digest. `token-revoke --agent cfl` removes access and stops pending delivery for that agent on the next start. Platform credential rotation uses the same credential-put reference, only for the same pinned native identity. Receiver secret rotation is independent and preserves queued payload bytes for the same URL. Master-key rotation is not implemented; back up and preserve the existing key. Raw tokens are never stored in SQLite; AES-256-GCM credential ciphertext uses random nonces and authenticates reference/account/kind/version/key ID. SQLite contains a sealed key check to reject the wrong key before serving. Its application ID and version identify this supported fresh-state format; an unknown database is refused before model preparation. Legacy Post state/config is not migrated.
 
 ## Start, status, shutdown and failure recovery
 
-`node /opt/lamplit-post/dist/cli.cjs serve --config /etc/lamplit-post/koishi.yml` starts adapters before opening HTTP. Bounded startup failure closes owned work and fails. Success prints one safe JSON readiness record; the safe JSON readiness status contains account IDs/readiness, queue counts and error categories without native identities, bodies or secrets. `/healthz` reports only a healthy boolean (200/503), without authentication. All `/mcp` and asset requests require the independent agent Bearer. MCP has no browser Origin access and no persistent platform execution session. Its timeout includes reading the complete authenticated request body and the tool operation; an incomplete body is cancelled with HTTP 408 and its connection is closed. Do not expose loopback without an authenticated TLS reverse proxy/tunnel; upstream routing does not replace application Bearer auth.
+`pnpm run start` from the app root starts adapters before opening HTTP. Bounded startup failure closes owned work and fails. Success prints one safe JSON readiness record; the safe JSON readiness status contains account IDs/readiness, queue counts and error categories without native identities, bodies or secrets. `/healthz` reports only a healthy boolean (200/503), without authentication. All `/mcp` and asset requests require the independent agent Bearer. MCP has no browser Origin access and no persistent platform execution session. Its timeout includes reading the complete authenticated request body and the tool operation; an incomplete body is cancelled with HTTP 408 and its connection is closed. Do not expose loopback without an authenticated TLS reverse proxy/tunnel; upstream routing does not replace application Bearer auth.
 
 Signal the whole Koishi process group with SIGINT/SIGTERM (or use the service template’s `KillMode=control-group`). Signalling only the supervisor PID is insufficient. The worker first closes optional Console HTTP and WebSocket intake and awaits actual socket closure, then stops Post HTTP intake, aborts active platform/receiver I/O, stops sync/observation and binding workers, disposes adapter scopes, drains the provider transaction queue, closes SQLite and releases ownership. The worker releases ownership after cleanup; the maintained CLI supervises its exit. `status --config FILE` is an **offline** inspection of safe identity/account names, delivery counts and gap categories; it refuses a serving owner. Use the service journal/health during serving. Never infer healthy capture from a successfully bound HTTP socket alone.
 
@@ -57,10 +62,10 @@ Remote clients upload raw bytes to authenticated `POST /assets`; download only t
 The terminal helper uses a private file/environment token, never argv:
 
 ```sh
-POST_TOKEN_FILE=/private/post-agent-token node /opt/lamplit-post/dist/cli.cjs asset-upload --url http://127.0.0.1:8787 --file ./picture.png
+POST_TOKEN_FILE=/private/post-agent-token node dist/cli.cjs asset-upload --url http://127.0.0.1:18787 --file ./picture.png
 ```
 
-QQ ordinary-group member-list API has no public authenticated list mapping in pinned adapter 4.14.0. V1 returns unsupported; it never substitutes channels or observed senders. Matrix uses getJoinedRoomMembers and returns permission_required/unavailable honestly on upstream failure. Account identity is verified during startup, not fetched per tool call. No E2EE, Matrix AS, Post administration UI, FTS, MCP Events, native audio codecs, or old-gateway historical import.
+QQ ordinary-group member-list API has no public authenticated list mapping in pinned adapter 4.14.0. V1 returns unsupported; it never substitutes channels or observed senders. Matrix uses getJoinedRoomMembers and returns permission_required/unavailable honestly on upstream failure. Account identity is verified during startup, not fetched per tool call. No E2EE, Matrix AS, custom Post business dashboard, FTS, MCP Events, native audio codecs, or old-gateway historical import.
 
 For synthesized speech, the agent selects and calls a separate TTS tool, obtains a local audio file, uses the existing authenticated upload path/helper, then explicitly sends that asset to an account/conversation. Post supplies authorized transport, durable asset/message records and honest send outcomes. Generation method grants no additional media privileges. Post has no synthesis, voice/model selection, TTS provider registry/credentials or automatic assistant-to-speech behavior. Incoming STT is deferred. Native voice-bubble rendering, codecs and transcoding are a separate deferred capability; an uploaded audio file remains an ordinary V1 attachment.
 
@@ -72,7 +77,7 @@ Restore into explicitly chosen empty private paths while Post is stopped; restor
 
 ## Orc-owned deployment and cutover
 
-After Post and CFL PRs pass independent review and merge, Orc selects the actual target/user/paths, builds the exact reviewed revision, provisions authorized credentials, and installs a path-adjusted copy of `deploy/lamplit-post.service`. Deployment remains paused. The template is inert until deliberately installed by Orc; replace User, Node/CLI paths and ReadWritePaths. Ensure external key parent ownership allows only that service user. Run the repository package/help/config checks against the selected config before enabling the service. Set service stop timeout above Post's bounded request timeout plus socket-close allowance.
+After the relevant Post/ko PRs pass independent review and merge, Orc selects the actual target/user/paths, builds the exact reviewed revision, provisions authorized credentials, and installs a path-adjusted copy of `deploy/lamplit-post.service`. Deployment remains paused. The template is inert until deliberately installed by Orc; replace User, Node/pnpm paths, app root and writable paths. Ensure external key parent ownership allows only that service user. Run the repository package/help/config checks against the selected config before enabling the service. Set service stop timeout above Post's bounded request timeout plus socket-close allowance.
 
 Orc then starts Post, checks health/safe status, configures CFL with the exact v1 contract, dedicated receiver auth, Post base URL and agent token; verifies an authorized QQ and Matrix message enters the same existing session; verifies native replies and one image/file roundtrip; and only then disables the replaced per-platform gateway wiring/services. Preserve existing consumer history/session and back up configurations for rollback. Keet remains outside this cutover. A merge is not deployment. This Worker has performed no live install, credentials, real IM sends or cutover.
 

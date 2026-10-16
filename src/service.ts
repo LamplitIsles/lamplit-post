@@ -1,7 +1,7 @@
 import { $ } from "minato";
 import { createHmac } from "node:crypto";
 import { Config, Binding, Scope } from "./config";
-import { Store, opaque, digest } from "./store";
+import { Store, opaque, digest, checkConversationPin } from "./store";
 import { Assets } from "./assets";
 import { Fault, need } from "./errors";
 import type { Observation, Platform } from "./platform";
@@ -35,13 +35,7 @@ export class Service {
           const r = (
             await db.get("post_conversations", { id: scope.conversation_id })
           )[0];
-          if (r)
-            need(
-              r.account === scope.account_id &&
-                r.native === scope.native_id &&
-                r.type === scope.type,
-              "conflict",
-            );
+          if (r) checkConversationPin(r, scope);
           else
             await db.create("post_conversations", {
               id: scope.conversation_id,

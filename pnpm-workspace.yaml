@@ -12,3 +12,7 @@ packageExtensions:
         optional: true
 patchedDependencies:
   '@koishi-ce/plugin-database-sqlite@1.2.2': patches/@koishi-ce__plugin-database-sqlite@1.2.2.patch
+  '@koishijs/client@5.30.11': patches/@koishijs__client@5.30.11.patch
+  '@koishijs/plugin-console@5.30.11': patches/@koishijs__plugin-console@5.30.11.patch
+  '@koishijs/plugin-logger@2.6.9': patches/@koishijs__plugin-logger@2.6.9.patch
+  '@koishijs/plugin-market@2.11.12': patches/@koishijs__plugin-market@2.11.12.patch

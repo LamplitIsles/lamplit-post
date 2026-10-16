@@ -6,7 +6,8 @@ import { start } from "../src/runtime";
 import { Store } from "../src/store";
 import { Service } from "../src/service";
 import { serve } from "../src/http";
-import { ConfigSchema } from "../src/config";
+import { Schema } from "@koishijs/core";
+import { ConfigSchema, parseConfig } from "../src/config";
 import { platformsFixture } from "./fixtures/platforms";
 import { stateFixture, until } from "./fixtures/state";
 import { consumerFixture } from "./fixtures/consumer";
@@ -359,7 +360,18 @@ test("durable request ledger preserves partial/unknown, rejects conflict, never 
       request_id: "drip",
       content: [{ type: "text", text: "stall" }],
     });
-    expect(unknown.status).toBe("unknown");
+    expect(
+      unknown.status,
+      unknown.status === "unknown"
+        ? undefined
+        : JSON.stringify({
+            result: unknown,
+            native_sends: f.p.sendCount,
+            elapsed_ms: Date.now() - start,
+            paths: f.p.calls.map(({ method, path }) => ({ method, path })),
+            status: await f.r.service.status(),
+          }),
+    ).toBe("unknown");
     expect(Date.now() - start).toBeLessThan(1200);
     await until(async () => f.p.aborts > 0);
     f.p.drip(false);
@@ -419,7 +431,22 @@ test("strict config rejects unknown fields, duplicate IDs and unsafe refs", asyn
   const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
   try {
     expect(ConfigSchema(s.config)).toBeDefined();
-    expect(() => ConfigSchema({ ...s.config, unknown: true })).toThrow();
+    expect(() => parseConfig({ ...s.config, unknown: true })).toThrow();
+    const browserSchema = new Schema(JSON.parse(JSON.stringify(ConfigSchema)));
+    expect(browserSchema(s.config)).toBeDefined();
+    expect(() =>
+      browserSchema({
+        ...s.config,
+        bindings: [
+          {
+            ...s.config.bindings[0],
+            scopes: [
+              { ...s.config.bindings[0].scopes[0], account_id: "missing" },
+            ],
+          },
+        ],
+      }),
+    ).toThrow("Unknown account");
     expect(() =>
       ConfigSchema({
         ...s.config,

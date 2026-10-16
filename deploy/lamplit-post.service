@@ -1,13 +1,15 @@
-# Template only. Replace executable/config paths and User before installing.
+# Template only. Supply the reviewed Node24/pnpm12 tools and initialize app once.
 [Unit]
-Description=Lamplit Post private IM backend
+Description=Lamplit Post native managed application
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=REPLACE_WITH_SERVICE_USER
-ExecStart=/opt/node24/bin/node /opt/lamplit-post/dist/cli.cjs serve --config /etc/lamplit-post/koishi.yml
+WorkingDirectory=/home/REPLACE_WITH_SERVICE_USER/.local/share/lamplit-post/app
+Environment=PATH=/opt/node24/bin:/opt/pnpm12/bin:/usr/bin:/bin
+ExecStart=/opt/pnpm12/bin/pnpm run start
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=150s
@@ -17,9 +19,6 @@ KillMode=control-group
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/lamplit-post /etc/lamplit-post
 
 [Install]
 WantedBy=multi-user.target

@@ -6,8 +6,8 @@ import {
 } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { Config } from "./config";
-import type { PostDatabase } from "./models";
+import type { Config, Scope } from "./config";
+import type { PostDatabase, Tables } from "./models";
 import { Ownership } from "./ownership";
 import { Fault, need } from "./errors";
 export const opaque = (prefix: string) =>
@@ -86,9 +86,19 @@ export class Store {
   }
   async secret(ref: string, account: string, kind: string) {
     const r = (await this.db.get("post_vault", { ref }))[0];
+    return Store.unseal(this.key, r, ref, account, kind);
+  }
+  /** Also used at the provider startup boundary before any schema preparation. */
+  static unseal(
+    key: Buffer,
+    r: Tables["post_vault"] | undefined,
+    ref: string,
+    account: string,
+    kind: string,
+  ) {
     need(r && r.account === account && r.kind === kind, "unavailable");
     try {
-      const d = createDecipheriv("aes-256-gcm", this.key, Buffer.from(r.nonce));
+      const d = createDecipheriv("aes-256-gcm", key, Buffer.from(r.nonce));
       d.setAAD(Buffer.from(JSON.stringify([ref, account, kind, 1, r.key_id])));
       d.setAuthTag(Buffer.from(r.tag));
       return Buffer.concat([
@@ -99,6 +109,7 @@ export class Store {
       throw new Fault("unavailable", "Vault authentication failed");
     }
   }
+
   async issue(agent: string) {
     need(
       this.config.bindings.some((b) => b.agent_id === agent),
@@ -131,14 +142,59 @@ export class Store {
       )
         return agent;
   }
+  /** Read the existing immutable pins on this owner's provider before config writes. */
+  async checkPins(config: Config) {
+    const [identities, conversations] = await Promise.all([
+      this.db.get("post_identities", {}),
+      this.db.get("post_conversations", {}),
+    ]);
+    for (const account of config.accounts) {
+      const row = identities.find((row) => row.account === account.id);
+      if (row) checkIdentityPin(row, account.platform, account.native_id);
+    }
+    for (const binding of config.bindings)
+      for (const scope of binding.scopes) {
+        const row = conversations.find(
+          (row) => row.id === scope.conversation_id,
+        );
+        if (row) checkConversationPin(row, scope);
+        // A persisted native scope also owns its ID through the model's unique key.
+        const native = conversations.find(
+          (row) =>
+            row.account === scope.account_id &&
+            row.native === scope.native_id &&
+            row.type === scope.type,
+        );
+        need(!native || native.id === scope.conversation_id, "conflict");
+      }
+  }
   async pin(account: string, platform: string, native: string) {
     await this.db.withTransaction(async (db) => {
       const r = (await db.get("post_identities", { account }))[0];
-      if (r) need(r.platform === platform && r.native === native, "conflict");
+      if (r) checkIdentityPin(r, platform, native);
       else await db.create("post_identities", { account, platform, native });
     });
   }
   async gap(account: string, category: string) {
     await this.db.create("post_gaps", { account, category, at: Date.now() });
   }
+}
+
+export function checkIdentityPin(
+  row: Tables["post_identities"],
+  platform: string,
+  native: string,
+) {
+  need(row.platform === platform && row.native === native, "conflict");
+}
+export function checkConversationPin(
+  row: Tables["post_conversations"],
+  scope: Scope,
+) {
+  need(
+    row.account === scope.account_id &&
+      row.native === scope.native_id &&
+      row.type === scope.type,
+    "conflict",
+  );
 }

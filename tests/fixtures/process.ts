@@ -3,9 +3,14 @@ import { until } from "./state";
 /** Each process group belongs solely to this test; stdio is always drained. */
 export function processFixture(
   args: string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string } = {},
+  options: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    input?: string;
+    executable?: string;
+  } = {},
 ) {
-  const child = spawn(process.execPath, args, {
+  const child = spawn(options.executable ?? process.execPath, args, {
     cwd: options.cwd,
     env: options.env ?? process.env,
     detached: true,

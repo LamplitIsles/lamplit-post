@@ -350,6 +350,20 @@ export class MatrixUserBot
         content,
         opaque("post"),
       );
+      need(
+        typeof result.event_id === "string" && result.event_id.length > 0,
+        "unavailable",
+      );
+      // The native SDK has confirmed an ID. Analytics counts framework events,
+      // independently of Post archive/delivery semantics (QQ already emits send).
+      const session = this.session({
+        type: "send",
+        timestamp: Date.now(),
+        channel: { id: scope.native_id, type: scope.type === "direct" ? 1 : 0 },
+        message: { id: result.event_id },
+        user: { id: this.nativeUserId },
+      });
+      this.ctx.emit(session, "send", session);
       return [result.event_id];
     });
   }

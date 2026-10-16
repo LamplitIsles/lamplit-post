@@ -1,6 +1,6 @@
 import { boundedBytes } from "./io";
 import { HTTP } from "@koishijs/plugin-http";
-import { Context, Logger, h } from "@koishijs/core";
+import { Context, h } from "@koishijs/core";
 import { QQBot as QQ } from "@koishijs/plugin-adapter-qq";
 import { decodeGroupMessage, type QQBot } from "@satorijs/adapter-qq";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -28,7 +28,7 @@ export class Host {
   ) {
     this.ctx = root;
     // Upstream loggers can include raw request/response bodies. Only Post safe categories are exported.
-    Logger.targets = [];
+
     if (!this.ctx.http)
       this.ctx.plugin(HTTP, { timeout: service.config.timeout_ms });
     this.ctx.http.defaultDecoder = async (response) =>

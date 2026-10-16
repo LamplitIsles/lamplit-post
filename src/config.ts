@@ -2,8 +2,6 @@ import { Schema } from "@koishijs/core";
 import { parse } from "yaml";
 import { readFile, stat } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
-import { createRequire } from "node:module";
-import { realpath } from "node:fs/promises";
 const id = () =>
   Schema.string()
     .pattern(/^[a-zA-Z0-9_-]{1,64}$/)
@@ -70,20 +68,20 @@ function strict(schema: Schema, value: any) {
   } else if (schema.type === "array" && Array.isArray(value))
     for (const item of value) strict(schema.inner!, item);
 }
-function url(value: string) {
-  const u = new URL(value);
-  if (
-    !["http:", "https:"].includes(u.protocol) ||
-    u.username ||
-    u.password ||
-    u.hash ||
-    u.search
-  )
-    throw new Error("Invalid endpoint");
-}
-export const ConfigSchema = Schema.transform(fields, (input) => {
-  const cfg = fields(input);
-  strict(fields, cfg);
+// The native Config client serializes this callback. Keep it closure-free.
+const validated = Schema.transform(fields, (input) => {
+  const cfg = input as ReturnType<typeof fields>;
+  function url(value: string) {
+    const u = new URL(value);
+    if (
+      !["http:", "https:"].includes(u.protocol) ||
+      u.username ||
+      u.password ||
+      u.hash ||
+      u.search
+    )
+      throw new Error("Invalid endpoint");
+  }
   for (const items of [cfg.accounts, cfg.bindings])
     if (new Set(items.map((x) => x.id)).size !== items.length)
       throw new Error("Duplicate ID");
@@ -131,8 +129,25 @@ export const ConfigSchema = Schema.transform(fields, (input) => {
     }
   }
   return cfg;
-});
+}).hidden();
+// Stock Config renders object/intersection fields; transforms alone are opaque.
+export const ConfigSchema = Schema.intersect([fields, validated]);
 export type Config = ReturnType<typeof ConfigSchema>;
+/** Server parse boundary derives strictness from the one framework field Schema. */
+export function parseConfig(input: unknown): Config {
+  // Loader separates these native entry fields from plugin options as well.
+  const config =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? Object.fromEntries(
+          Object.entries(input).filter(
+            ([key]) =>
+              !["$label", "$collapsed", "$if", "$filter"].includes(key),
+          ),
+        )
+      : input;
+  strict(fields, config);
+  return ConfigSchema(config as Parameters<typeof ConfigSchema>[0]);
+}
 export type Binding = Config["bindings"][number];
 export type Scope = Binding["scopes"][number];
 export type AccountConfig = Config["accounts"][number];
@@ -153,17 +168,23 @@ export async function loadConfig(path: string) {
     throw new Error(
       "Set daemon.autoRestart to false; the service manager owns restart",
     );
-  const entries = Object.keys(root.plugins).filter((key) =>
-    /(^|\/)post-plugin\.cjs(?::[a-z0-9]+)?$/.test(key),
-  );
+  const entries = postEntries(root.plugins);
   if (entries.length !== 1) throw new Error("One Post plugin entry required");
-  const [plugin] = entries;
-  if (JSON.stringify(root.plugins[plugin]).includes("${{"))
+  const [plugins, plugin] = entries[0];
+  if (JSON.stringify(plugins[plugin]).includes("${{"))
     throw new Error("Use literal Post configuration values");
-  const cfg = ConfigSchema(root.plugins[plugin]);
-  await validateConsole(root, plugin, cfg);
-  cfg.data_dir = resolve(dirname(path), cfg.data_dir);
-  cfg.master_key_file = resolve(dirname(path), cfg.master_key_file);
+  const cfg = parseConfig(plugins[plugin]);
+  validateApplication(root, cfg, dirname(path));
+  return resolveConfigPaths(cfg, dirname(path));
+}
+export function resolveConfigPaths(raw: Config, base: string): Config {
+  if (JSON.stringify(raw).includes("${{"))
+    throw new Error("Use literal Post configuration values");
+  const cfg = {
+    ...raw,
+    data_dir: resolve(base, raw.data_dir),
+    master_key_file: resolve(base, raw.master_key_file),
+  };
   if (
     cfg.master_key_file === cfg.data_dir ||
     cfg.master_key_file.startsWith(cfg.data_dir + "/")
@@ -177,87 +198,60 @@ export async function privateFile(path: string) {
     throw new Error("Private file permissions required");
 }
 
-/** The unauthenticated native preview is an empty, fixed read-only plugin set. */
-async function validateConsole(
-  root: { plugins: Record<string, unknown>; [key: string]: unknown },
-  post: string,
+/** Native groups remain ordinary loader configuration. */
+export function postEntries(
+  plugins: Record<string, any>,
+): [Record<string, any>, string][] {
+  return Object.entries(plugins).flatMap(([key, value]) => {
+    const name = key.split(":")[0];
+    if (name === "group") return postEntries(value ?? {});
+    return name === "post" ||
+      name === "koishi-plugin-post" ||
+      /(^|\/)post-plugin\.cjs$/.test(name)
+      ? [[plugins, key] as [Record<string, any>, string]]
+      : [];
+  });
+}
+export function validateLogRoot(root: string, data: string, base: string) {
+  const logs = resolve(base, root),
+    directory = resolve(base, data);
+  if (logs === directory || logs.startsWith(directory + "/"))
+    throw new Error("Logs must be outside Post data directory");
+}
+export function validateApplication(
+  root: any,
   cfg: Config,
+  base = process.cwd(),
 ) {
-  const { plugins } = root;
-  function hasConsole(entries: Record<string, unknown>): boolean {
-    return Object.entries(entries).some(
-      ([key, value]) =>
-        /(?:^|\/)(?:plugin-)?console(?:\/|:|$)/.test(key) ||
-        (key.split(":")[0] === "group" &&
-          !!value &&
-          typeof value === "object" &&
-          hasConsole(value as Record<string, unknown>)),
-    );
-  }
-  if (!hasConsole(plugins)) return;
   if (
     ["host", "port", "maxPort", "selfUrl"].some((key) =>
       Object.hasOwn(root, key),
     )
   )
-    throw new Error(
-      "Use only the explicit Console server entry, not legacy root listeners",
-    );
-  const entries = Object.keys(plugins).filter((key) => key !== post);
-  const require = createRequire(resolve(process.argv[1]));
-  const names = ["server", "console", "status"];
-  if (
-    entries.length !== names.length ||
-    cfg.accounts.length ||
-    cfg.bindings.length
-  )
-    throw new Error(
-      "Console preview requires only native read-only plugins and empty Post",
-    );
-  for (const name of names) {
-    const key = entries.find((key) =>
-      key.includes("/@koishijs/plugin-" + name + "/"),
-    );
-    if (
-      !key ||
-      !key.startsWith("/") ||
-      (await realpath(key.replace(/:[a-z0-9]+$/, ""))) !==
-        (await realpath(require.resolve("@koishijs/plugin-" + name)))
-    )
-      throw new Error("Console plugin must resolve from this artifact");
-    if (
-      name === "server" &&
-      Object.keys(plugins).indexOf(key) > Object.keys(plugins).indexOf(post)
-    )
-      throw new Error(
-        "Console server must precede Post for lifecycle ownership",
-      );
-    const value = plugins[key] as Record<string, unknown>;
-    const allowed =
-      name === "server"
-        ? ["host", "port"]
-        : name === "console"
-          ? ["uiPath", "apiPath", "selfUrl", "open", "devMode"]
-          : [];
-    if (!value || Object.keys(value).some((key) => !allowed.includes(key)))
-      throw new Error("Unsupported Console preview options");
-    if (
-      name === "server" &&
-      (value.host !== "127.0.0.1" ||
-        !Number.isInteger(value.port) ||
-        Number(value.port) < 1 ||
-        Number(value.port) > 65535 ||
-        value.port === cfg.port)
-    )
-      throw new Error("Console requires a separate loopback port");
-    if (
-      name === "console" &&
-      (value.uiPath !== "" ||
-        value.apiPath !== "/status" ||
-        value.selfUrl !== "" ||
-        value.open !== false ||
-        value.devMode !== false)
-    )
-      throw new Error("Console requires native production resources at root");
+    throw new Error("Use an explicit server plugin for listeners");
+  function visit(plugins: Record<string, any>) {
+    for (const [key, value] of Object.entries(plugins)) {
+      const name = key.split(":")[0];
+      if (name === "group") visit(value ?? {});
+      if (
+        name === "server" &&
+        (value.host !== "127.0.0.1" ||
+          !Number.isInteger(value.port) ||
+          value.port < 1 ||
+          value.port > 65535 ||
+          value.port === cfg.port)
+      )
+        throw new Error("Console requires a separate loopback port");
+      if (name === "logger")
+        validateLogRoot(value?.root ?? "data/logs", cfg.data_dir, base);
+      if (
+        name === "auth" &&
+        (value?.admin?.enabled !== false || value?.admin?.password)
+      )
+        throw new Error(
+          "Provision native administrator offline; disable startup admin reset",
+        );
+    }
   }
+  visit(root.plugins);
 }

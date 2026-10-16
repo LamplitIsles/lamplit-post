@@ -67,6 +67,9 @@ replay unknown native sends to compensate for storage uncertainty.
 
 The data-directory lock and private external key precede provider startup.
 Fresh initialization atomically publishes and syncs the random external key.
+Reopen authenticates the encrypted vault key-check through the same native
+provider handle before Minato can prepare any Post/Auth/Analytics schema; a
+wrong key leaves existing bytes unchanged.
 The provider's public startup extension stamps a fresh database with application
 ID `0x504f5354` and format version 1 before framework model preparation. Reopen
 checks the native SQLite header before opening the driver. Missing/wrong external
@@ -84,10 +87,13 @@ exclusive ownership.
 
 Configuration changes apply on restart. The normal Koishi loader owns writable
 startup configuration; read-only CLI validation calls the same Schema and domain
-validators without starting it. The CLI runs its maintained supervisor from the
-artifact directory, whose declared HTTP/proxy dependencies avoid legacy manifest
-migration. Stop the complete process group, as in the service template. Post
-awaits its own native sockets, operations and provider before releasing the lock;
+validators without starting it. The CLI runs the original supervisor from the
+one writable app directory, whose manifest declares HTTP/proxy dependencies to
+avoid legacy manifest migration.
+Auth user/token/binding and Analytics tables share this provider with Post.
+Native Config writes Post edits before one guarded worker restart; the app drains
+platform/HTTP/Installer work and native Analytics/Logger before provider close.
+Stop the complete process group, as in the service template. Post awaits its own native sockets, operations and provider before releasing the lock;
 framework disposal alone is not treated as proof that actual I/O has finished.
 
 Provider MIT permission notice (the attribution above applies):
