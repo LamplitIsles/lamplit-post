@@ -1,143 +1,174 @@
-import { z } from "zod";
-import { parse } from "@iarna/toml";
+import { Schema } from "@koishijs/core";
+import { parse } from "yaml";
 import { readFile, stat } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
-const id = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
-const ref = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
-const url = z
-  .string()
-  .url()
-  .refine((s) => {
-    const u = new URL(s);
-    return (
-      ["http:", "https:"].includes(u.protocol) &&
-      !u.username &&
-      !u.password &&
-      !u.hash &&
-      !u.search
-    );
-  });
-const scope = z
-  .object({
-    account_id: id,
-    conversation_id: id,
-    native_id: z.string().min(1).max(256),
-    type: z.enum(["direct", "group"]),
-    senders: z.array(z.string().min(1)).default([]),
-  })
-  .strict();
-export const ConfigSchema = z
-  .object({
-    data_dir: z.string().min(1),
-    master_key_file: z.string().min(1),
-    hostname: z.literal("127.0.0.1").default("127.0.0.1"),
-    port: z.number().int().min(0).max(65535).default(8787),
-    max_asset_bytes: z
-      .number()
-      .int()
-      .positive()
-      .max(64 * 1024 * 1024)
-      .default(16 * 1024 * 1024),
-    timeout_ms: z.number().int().min(50).max(120000).default(30000),
-    backlog_limit: z.number().int().positive().default(10000),
-    accounts: z
-      .array(
-        z
-          .object({
-            id,
-            platform: z.enum(["qq", "matrix"]),
-            credential: ref,
-            native_id: z.string().min(1),
-            homeserver: url.optional(),
-          })
-          .strict()
-          .superRefine((v, c) => {
-            if (v.platform === "matrix" && !v.homeserver)
-              c.addIssue({
-                code: "custom",
-                message: "Matrix homeserver required",
-              });
-          }),
+const id = () =>
+  Schema.string()
+    .pattern(/^[a-zA-Z0-9_-]{1,64}$/)
+    .required();
+const text = () => Schema.string().min(1).required();
+const scope = Schema.object({
+  account_id: id(),
+  conversation_id: id(),
+  native_id: text().max(256),
+  type: Schema.union(["direct", "group"]).required(),
+  senders: Schema.array(text()).default([]),
+});
+const fields = Schema.object({
+  data_dir: text(),
+  master_key_file: text(),
+  hostname: Schema.const("127.0.0.1").default("127.0.0.1"),
+  port: Schema.natural().max(65535).default(8787),
+  max_asset_bytes: Schema.natural()
+    .min(1)
+    .max(64 * 1024 * 1024)
+    .default(16 * 1024 * 1024),
+  timeout_ms: Schema.natural().min(50).max(120000).default(30000),
+  backlog_limit: Schema.natural()
+    .min(1)
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(10000),
+  accounts: Schema.array(
+    Schema.object({
+      id: id(),
+      platform: Schema.union(["qq", "matrix"]).required(),
+      credential: id(),
+      native_id: text(),
+      homeserver: Schema.string(),
+    }),
+  )
+    .min(1)
+    .required(),
+  bindings: Schema.array(
+    Schema.object({
+      id: id(),
+      agent_id: id(),
+      receiver_url: text(),
+      receiver_credential: id(),
+      scopes: Schema.array(scope).min(1).required(),
+      wake: Schema.object({
+        direct: Schema.boolean().default(false),
+        mention: Schema.boolean().default(true),
+        reply: Schema.boolean().default(true),
+        aliases: Schema.array(text().max(128)).default([]),
+      }).required(),
+    }),
+  )
+    .min(1)
+    .required(),
+});
+/** Strictness derives from the same framework field schema, never a parallel schema. */
+function strict(schema: Schema, value: any) {
+  if (value == null) return;
+  if (
+    schema.type === "object" &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  ) {
+    for (const key of Object.keys(value)) {
+      if (!schema.dict?.[key]) throw new Error("Unknown configuration field");
+      strict(schema.dict[key], value[key]);
+    }
+  } else if (schema.type === "array" && Array.isArray(value))
+    for (const item of value) strict(schema.inner!, item);
+}
+function url(value: string) {
+  const u = new URL(value);
+  if (
+    !["http:", "https:"].includes(u.protocol) ||
+    u.username ||
+    u.password ||
+    u.hash ||
+    u.search
+  )
+    throw new Error("Invalid endpoint");
+}
+export const ConfigSchema = Schema.transform(fields, (input) => {
+  const cfg = fields(input);
+  strict(fields, cfg);
+  for (const items of [cfg.accounts, cfg.bindings])
+    if (new Set(items.map((x) => x.id)).size !== items.length)
+      throw new Error("Duplicate ID");
+  if (
+    new Set(cfg.accounts.map((a) => JSON.stringify([a.platform, a.native_id])))
+      .size !== cfg.accounts.length
+  )
+    throw new Error("Duplicate platform identity");
+  const refs = [
+    ...cfg.accounts.map((a) => a.credential),
+    ...cfg.bindings.map((b) => b.receiver_credential),
+  ];
+  if (refs.includes("__keycheck"))
+    throw new Error("Reserved credential reference");
+  if (new Set(refs).size !== refs.length)
+    throw new Error("Credential refs must be unique");
+  for (const a of cfg.accounts) {
+    if (a.platform === "matrix" && !a.homeserver)
+      throw new Error("Matrix homeserver required");
+    if (a.homeserver) url(a.homeserver);
+  }
+  const conversations = new Map<string, string>(),
+    native = new Map<string, string>(),
+    ids = new Map<string, string>();
+  for (const b of cfg.bindings) {
+    url(b.receiver_url);
+    for (const s of b.scopes) {
+      if (!cfg.accounts.some((a) => a.id === s.account_id))
+        throw new Error("Unknown account");
+      const key = JSON.stringify([s.account_id, s.conversation_id]),
+        val = JSON.stringify([s.native_id, s.type]),
+        nk = JSON.stringify([s.account_id, s.native_id, s.type]);
+      if (conversations.has(key) && conversations.get(key) !== val)
+        throw new Error("Conflicting conversation");
+      if (native.has(nk) && native.get(nk) !== s.conversation_id)
+        throw new Error("Native conversation has conflicting Post IDs");
+      if (
+        ids.has(s.conversation_id) &&
+        ids.get(s.conversation_id) !== s.account_id
       )
-      .min(1),
-    bindings: z
-      .array(
-        z
-          .object({
-            id,
-            agent_id: id,
-            receiver_url: url,
-            receiver_credential: ref,
-            scopes: z.array(scope).min(1),
-            wake: z
-              .object({
-                direct: z.boolean().default(false),
-                mention: z.boolean().default(true),
-                reply: z.boolean().default(true),
-                aliases: z.array(z.string().min(1).max(128)).default([]),
-              })
-              .strict(),
-          })
-          .strict(),
-      )
-      .min(1),
-  })
-  .strict()
-  .superRefine((v, c) => {
-    for (const items of [v.accounts, v.bindings])
-      if (new Set(items.map((x) => x.id)).size !== items.length)
-        c.addIssue({ code: "custom", message: "Duplicate ID" });
-    const refs = [
-      ...v.accounts.map((a) => a.credential),
-      ...v.bindings.map((b) => b.receiver_credential),
-    ];
-    if (new Set(refs).size !== refs.length)
-      c.addIssue({ code: "custom", message: "Credential refs must be unique" });
-    const conv = new Map<string, string>();
-    const native = new Map<string, string>();
-    const ids = new Map<string, string>();
-    for (const b of v.bindings)
-      for (const s of b.scopes) {
-        if (!v.accounts.some((a) => a.id === s.account_id))
-          c.addIssue({ code: "custom", message: "Unknown account" });
-        const key = s.account_id + ":" + s.conversation_id;
-        const val = JSON.stringify([s.native_id, s.type]);
-        if (conv.has(key) && conv.get(key) !== val)
-          c.addIssue({ code: "custom", message: "Conflicting conversation" });
-        const nativeKey = JSON.stringify([s.account_id, s.native_id, s.type]);
-        if (
-          native.has(nativeKey) &&
-          native.get(nativeKey) !== s.conversation_id
-        )
-          c.addIssue({
-            code: "custom",
-            message: "Native conversation has conflicting Post IDs",
-          });
-        if (
-          ids.has(s.conversation_id) &&
-          ids.get(s.conversation_id) !== s.account_id
-        )
-          c.addIssue({
-            code: "custom",
-            message: "Conversation IDs must be globally unique",
-          });
-        native.set(nativeKey, s.conversation_id);
-        ids.set(s.conversation_id, s.account_id);
-        conv.set(key, val);
-      }
-  });
-export type Config = z.infer<typeof ConfigSchema>;
+        throw new Error("Conversation IDs must be globally unique");
+      conversations.set(key, val);
+      native.set(nk, s.conversation_id);
+      ids.set(s.conversation_id, s.account_id);
+    }
+  }
+  return cfg;
+});
+export type Config = ReturnType<typeof ConfigSchema>;
 export type Binding = Config["bindings"][number];
 export type Scope = Binding["scopes"][number];
 export type AccountConfig = Config["accounts"][number];
 export async function loadConfig(path: string) {
-  const permissions = await stat(path);
-  if (!permissions.isFile() || permissions.mode & 0o022)
+  const parent = await stat(dirname(resolve(path)));
+  const s = await stat(path);
+  if (
+    !parent.isDirectory() ||
+    parent.mode & 0o022 ||
+    !s.isFile() ||
+    s.mode & 0o022
+  )
     throw new Error("Config must not be writable by group/others");
-  const cfg = ConfigSchema.parse(parse(await readFile(path, "utf8")));
+  const root = parse(await readFile(path, "utf8"));
+  if (!root || typeof root !== "object" || !root.plugins)
+    throw new Error("One Post plugin entry required");
+  if (root.daemon?.autoRestart !== false)
+    throw new Error(
+      "Set daemon.autoRestart to false; the service manager owns restart",
+    );
+  const entries = Object.keys(root.plugins).filter((key) =>
+    /(^|\/)post-plugin\.cjs(?::[a-z0-9]+)?$/.test(key),
+  );
+  if (entries.length !== 1) throw new Error("One Post plugin entry required");
+  const [plugin] = entries;
+  if (JSON.stringify(root.plugins[plugin]).includes("${{"))
+    throw new Error("Use literal Post configuration values");
+  const cfg = ConfigSchema(root.plugins[plugin]);
   cfg.data_dir = resolve(dirname(path), cfg.data_dir);
   cfg.master_key_file = resolve(dirname(path), cfg.master_key_file);
-  if (cfg.master_key_file.startsWith(cfg.data_dir + "/"))
+  if (
+    cfg.master_key_file === cfg.data_dir ||
+    cfg.master_key_file.startsWith(cfg.data_dir + "/")
+  )
     throw new Error("Master key must be outside data directory");
   return cfg;
 }

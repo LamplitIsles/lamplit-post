@@ -1,4 +1,5 @@
-import { test, expect } from "bun:test";
+import { count } from "./fixtures/state";
+import { test, expect } from "vitest";
 import { createConnection } from "node:net";
 import { writeFile } from "node:fs/promises";
 import { ClientEvent, RoomEvent } from "matrix-js-sdk";
@@ -26,12 +27,12 @@ async function fixture(
   configure?: (
     s: Awaited<ReturnType<typeof stateFixture>>,
     p: Awaited<ReturnType<typeof platformsFixture>>,
-  ) => void,
+  ) => void | Promise<void>,
 ) {
   const p = await platformsFixture(),
     receiver = await consumerFixture(),
     s = await stateFixture(p.url, receiver.url, timeout);
-  configure?.(s, p);
+  await configure?.(s, p);
   const r = await start(s.config, { qqOrigin: p.url, qqGateway: p.gateway });
   const client = await connect(r.http.url, s.token);
   return {
@@ -53,17 +54,17 @@ async function fixture(
 }
 test("QQ private peer admission protects history, assets and send while retaining authorized self history", async () => {
   let token = "";
-  const f = await fixture(3000, (s) => {
+  const f = await fixture(3000, async (s) => {
     const b = structuredClone(s.config.bindings[0]!);
     b.id = "other-binding";
     b.agent_id = "other";
     b.receiver_credential = "other-receiver";
     b.scopes = [{ ...b.scopes[1]!, senders: ["someone-else"] }, b.scopes[0]!];
     s.config.bindings.push(b);
-    const store = new Store(s.config);
-    store.putSecret("other-receiver", b.id, "receiver", "test-receiver");
-    token = store.issue("other");
-    store.close();
+    const store = await Store.open(s.config);
+    await store.putSecret("other-receiver", b.id, "receiver", "test-receiver");
+    token = await store.issue("other");
+    await store.close();
   });
   let other: Client | undefined;
   try {
@@ -72,10 +73,14 @@ test("QQ private peer admission protects history, assets and send while retainin
       attachments: [{ url: f.p.url + "/attachment", content_type: "file" }],
     });
     await until(
-      () =>
-        !!f.r.store.db
-          .query("SELECT id FROM messages WHERE native=?")
-          .get("peer-asset"),
+      async () =>
+        !!(
+          await f.r.store.db.get(
+            "post_messages",
+            { native: "peer-asset" },
+            { fields: ["id"] },
+          )
+        )[0],
     );
     const inbound = (await f.call("read_messages", dm))
       .structuredContent as any;
@@ -200,7 +205,9 @@ test("image MIME and bytes preflight reject the entire send before native dispat
       })
     ).json()) as any;
     await writeFile(
-      f.r.service.assets.path(f.r.service.assets.row(image.asset_id)!.storage!),
+      f.r.service.assets.path(
+        (await f.r.service.assets.row(image.asset_id))!.storage!,
+      ),
       "ordinary nonimage bytes",
     );
     expect(
@@ -233,14 +240,22 @@ test("expired second QQ reply is failed with no second native submission and sta
       timestamp: new Date(Date.now() - 294000).toISOString(),
     });
     await until(
-      () =>
-        !!f.r.store.db
-          .query("SELECT id FROM messages WHERE native=?")
-          .get("expiring-target"),
+      async () =>
+        !!(
+          await f.r.store.db.get(
+            "post_messages",
+            { native: "expiring-target" },
+            { fields: ["id"] },
+          )
+        )[0],
     );
-    const reply = f.r.store.db
-      .query("SELECT id FROM messages WHERE native=?")
-      .get("expiring-target") as any;
+    const reply = (
+      await f.r.store.db.get(
+        "post_messages",
+        { native: "expiring-target" },
+        { fields: ["id"] },
+      )
+    )[0] as any;
     f.p.holdNextSend(1400);
     const args = {
       ...qq,
@@ -306,12 +321,12 @@ test("authenticated incomplete MCP body cancels actual TCP request within comple
         drips++;
       }
     }, 30);
-    await until(() => closed, 700);
+    await until(async () => closed, 700);
     expect(performance.now() - started).toBeLessThan(700);
     expect(drips).toBeGreaterThan(3);
     expect(response).toMatch(/^HTTP\/1.1 408/);
     expect(f.p.sendCount).toBe(0);
-    expect(f.r.store.db.query("SELECT count(*) n FROM sends").get()).toEqual({
+    expect({ n: await count(f.r.store.db, "sends") }).toEqual({
       n: 0,
     });
     // Body time is part of the same deadline as native I/O, not a fresh tool timeout.
@@ -337,10 +352,11 @@ test("authenticated incomplete MCP body cancels actual TCP request within comple
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
       },
+      ...{ duplex: "half" },
       body: new ReadableStream({
         async start(controller) {
           controller.enqueue(new TextEncoder().encode(request.slice(0, -1)));
-          await Bun.sleep(200);
+          await new Promise((resolve) => setTimeout(resolve, 200));
           controller.enqueue(new TextEncoder().encode(request.slice(-1)));
           controller.close();
         },
@@ -349,7 +365,7 @@ test("authenticated incomplete MCP body cancels actual TCP request within comple
     const body = (await result.json()) as any;
     expect(performance.now() - begun).toBeLessThan(450);
     expect(body.result.structuredContent.parts[0].status).toBe("unknown");
-    await until(() => f.p.aborts === 1);
+    await until(async () => f.p.aborts === 1);
     expect(f.p.sendCount).toBe(1);
   } finally {
     if (timer) clearInterval(timer);
@@ -500,53 +516,61 @@ test("actual Matrix SDK suppresses multi-batch startup and reconnect catchup the
     expect(bot.client.getSyncStateData()?.catchingUp).toBe(true);
     second.release();
     await until(
-      () =>
-        !!f.r.store.db
-          .query("SELECT id FROM messages WHERE native=?")
-          .get("$catchup-2"),
+      async () =>
+        !!(
+          await f.r.store.db.get(
+            "post_messages",
+            { native: "$catchup-2" },
+            { fields: ["id"] },
+          )
+        )[0],
     );
     expect(timeline.find((e) => e.id === "$catchup-2")).toMatchObject({
       liveEvent: true,
       catchingUp: true,
     });
-    expect(f.r.store.db.query("SELECT count(*) n FROM messages").get()).toEqual(
-      { n: 2 },
-    );
-    expect(
-      f.r.store.db.query("SELECT count(*) n FROM deliveries").get(),
-    ).toEqual({ n: 0 });
+    expect({ n: await count(f.r.store.db, "messages") }).toEqual({ n: 2 });
+    expect({ n: await count(f.r.store.db, "deliveries") }).toEqual({ n: 0 });
     drained.release();
-    await until(() => bot.client.getSyncStateData()?.catchingUp === false);
+    await until(
+      async () => bot.client.getSyncStateData()?.catchingUp === false,
+    );
     live.release();
-    await until(() => f.receiver.attempts.length === 1);
+    await until(async () => f.receiver.attempts.length === 1);
     lost.release();
-    await until(() => states.some((s) => s.state === "RECONNECTING"));
+    await until(async () => states.some((s) => s.state === "RECONNECTING"));
     reconnected.release();
     await until(
-      () =>
-        !!f.r.store.db
-          .query("SELECT id FROM messages WHERE native=?")
-          .get("$catchup-5"),
+      async () =>
+        !!(
+          await f.r.store.db.get(
+            "post_messages",
+            { native: "$catchup-5" },
+            { fields: ["id"] },
+          )
+        )[0],
       8000,
     );
     lastCatchup.release();
     await until(
-      () =>
-        !!f.r.store.db
-          .query("SELECT id FROM messages WHERE native=?")
-          .get("$catchup-6"),
+      async () =>
+        !!(
+          await f.r.store.db.get(
+            "post_messages",
+            { native: "$catchup-6" },
+            { fields: ["id"] },
+          )
+        )[0],
     );
-    expect(
-      f.r.store.db.query("SELECT count(*) n FROM deliveries").get(),
-    ).toEqual({ n: 1 });
+    expect({ n: await count(f.r.store.db, "deliveries") }).toEqual({ n: 1 });
     expect(f.receiver.attempts).toHaveLength(1);
     settled.release();
-    await until(() => bot.client.getSyncStateData()?.catchingUp === false);
-    resumed.release();
-    await until(() => f.receiver.attempts.length === 2);
-    expect(f.r.store.db.query("SELECT count(*) n FROM messages").get()).toEqual(
-      { n: 6 },
+    await until(
+      async () => bot.client.getSyncStateData()?.catchingUp === false,
     );
+    resumed.release();
+    await until(async () => f.receiver.attempts.length === 2);
+    expect({ n: await count(f.r.store.db, "messages") }).toEqual({ n: 6 });
     expect(f.p.sendCount).toBe(0);
   } finally {
     for (const g of gates) g.release();

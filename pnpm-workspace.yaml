@@ -1,0 +1,12 @@
+strictPeerDependencies: true
+allowBuilds:
+  esbuild: true
+packageExtensions:
+  '@koishi-ce/plugin-database-sqlite@1.2.2':
+    peerDependencies:
+      koishi: '4.18.11'
+    peerDependenciesMeta:
+      '@koishi-ce/koishi':
+        optional: true
+patchedDependencies:
+  '@koishi-ce/plugin-database-sqlite@1.2.2': patches/@koishi-ce__plugin-database-sqlite@1.2.2.patch

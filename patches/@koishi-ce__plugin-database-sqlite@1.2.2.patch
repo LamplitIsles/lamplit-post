@@ -1,0 +1,356 @@
+diff --git a/lib/index.d.ts b/lib/index.d.ts
+index 05f38dd4832c689500058cc7d9bbbdef6f42d4c0..a74b93e5b376e0f9a0527f450bd81752a63a2db4 100644
+--- a/lib/index.d.ts
++++ b/lib/index.d.ts
+@@ -70,9 +70,13 @@ declare class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+    * COMMIT 摧毁、或经队列等待自己而死锁。
+    */
+   private _txDomain;
++  readonly session?: { active: boolean; failure?: { error: unknown } };
+   /** 建立连接，并注册自定义 SQL 函数与类型 transformer（见 setup/）。 */
+   start(): Promise<void>;
++  private _closing;
++  private _stopTask;
+   stop(): Promise<void>;
++  private _access;
+   /**
+    * 执行语句的原语：成功走 debug、失败带语句与参数上下文重新抛出
+    * （其余 _all / _get / _run 都经由此处，日志只需看一处）。
+@@ -95,7 +99,7 @@ declare class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+    * 事务串行化：回调经 _enqueueTransaction 排队执行，整体运行在
+    * 事务域标记内（域内的批量写会并入本事务而不是另开）。
+    */
+-  withTransaction(callback: () => Promise<void>): Promise<void>;
++  withTransaction(callback: (session?: { active: boolean; failure?: { error: unknown } }) => Promise<void>): Promise<void>;
+   /**
+    * 事务执行的排队原语：同步占据队列尾（gate 占位），等前序事务落地
+    * 后以 BEGIN/COMMIT 执行 body，业务错误先 ROLLBACK 再原样抛出。
+diff --git a/lib/index.mjs b/lib/index.mjs
+index 561f31200a018051468cfb6fdb470ee104400e87..2f0fb4280b368beda9212ad1a1d601123d86f7ff 100644
+--- a/lib/index.mjs
++++ b/lib/index.mjs
+@@ -662,10 +662,24 @@ var SQLiteDriver = class extends Driver {
+ 			this.logger.info("已加载 SQLite 扩展：%s", target);
+ 		}
+ 	}
++	_closing = false;
++	_stopTask;
+ 	async stop() {
+-		await new Promise((resolve) => setTimeout(resolve, 0));
+-		this.db?.close();
++		if ((this.session?.active || this._txDomain.getStore()?.active)) throw new Error("cannot close inside transaction");
++		this._closing = true;
++		return this._stopTask ??= (async () => {
++			await this._transactionTask;
++			this.db?.close();
++			this._txDomain.disable();
++		})();
++	}
++	async _access(body) {
++		if (this.session?.failure) throw this.session.failure.error;
++		if (this.session && !this.session.active) throw new Error("transaction session expired");
++		if ((this.session?.active || this._txDomain.getStore()?.active)) return body();
++		return this._enqueueTransaction(body);
+ 	}
++
+ 	/**
+ 	* 执行语句的原语：成功走 debug、失败带语句与参数上下文重新抛出
+ 	* （其余 _all / _get / _run 都经由此处，日志只需看一处）。
+@@ -712,7 +726,19 @@ var SQLiteDriver = class extends Driver {
+ 	* 事务域标记内（域内的批量写会并入本事务而不是另开）。
+ 	*/
+ 	async withTransaction(callback) {
+-		return this._enqueueTransaction(callback);
++		let entered = false;
++		try {
++			if ((this.session?.active || this._txDomain.getStore()?.active)) throw new Error("nested transactions are not supported");
++			return await this._enqueueTransaction((session) => {
++				entered = true;
++				return callback(session);
++			});
++		} catch (error) {
++			if (!entered) {
++				try { await callback({ active: false, failure: { error } }); } catch {}
++			}
++			throw error;
++		}
+ 	}
+ 	/**
+ 	* 事务执行的排队原语：同步占据队列尾（gate 占位），等前序事务落地
+@@ -722,15 +748,17 @@ var SQLiteDriver = class extends Driver {
+ 	* within a transaction"）。
+ 	*/
+ 	_enqueueTransaction(body) {
++		if (this._closing) return Promise.reject(new Error("database closing"));
+ 		let release;
+ 		const gate = new Promise((resolve) => release = resolve);
+ 		const prev = this._transactionTask;
+ 		this._transactionTask = gate;
+ 		return (async () => {
+ 			if (prev) await prev.catch(() => {});
++			const domain = { active: true };
+ 			try {
+ 				this._run("BEGIN TRANSACTION");
+-				const result = await this._txDomain.run(true, body);
++				const result = await this._txDomain.run(domain, () => body(domain));
+ 				this._run("COMMIT");
+ 				return result;
+ 			} catch (error) {
+@@ -739,6 +767,7 @@ var SQLiteDriver = class extends Driver {
+ 				} catch {}
+ 				throw error;
+ 			} finally {
++				domain.active = false;
+ 				release();
+ 			}
+ 		})();
+@@ -752,51 +781,50 @@ var SQLiteDriver = class extends Driver {
+ 	* 的交织会让 SAVEPOINT 的释放脱离 LIFO 序而被外层 COMMIT 摧毁）。
+ 	*/
+ 	async runBatch(callback) {
+-		if (this._txDomain.getStore()) return callback();
+-		return this._enqueueTransaction(callback);
++		return this._access(callback);
+ 	}
+ 	async prepare(table, dropKeys) {
+-		return prepare(this, table, dropKeys);
++		return this._access(async () => prepare(this, table, dropKeys));
+ 	}
+ 	/** 基类 migrate 为 protected，开公开桥供 schema 模块的 prepare 尾段调用。 */
+ 	runMigration(table, hooks) {
+-		return this.migrate(table, hooks);
++		return this._access(async () => this.migrate(table, hooks));
+ 	}
+ 	async drop(table) {
+-		return drop(this, table);
++		return this._access(async () => drop(this, table));
+ 	}
+ 	async dropAll() {
+-		return dropAll(this);
++		return this._access(async () => dropAll(this));
+ 	}
+ 	async remove(sel) {
+-		return remove(this, sel);
++		return this._access(async () => remove(this, sel));
+ 	}
+ 	async get(sel) {
+-		return get(this, sel);
++		return this._access(async () => get(this, sel));
+ 	}
+ 	async eval(sel, expr) {
+-		return evaluate(this, sel, expr);
++		return this._access(async () => evaluate(this, sel, expr));
+ 	}
+ 	async set(sel, update) {
+-		return set(this, sel, update);
++		return this._access(async () => set(this, sel, update));
+ 	}
+ 	async create(sel, data) {
+-		return create(this, sel, data);
++		return this._access(async () => create(this, sel, data));
+ 	}
+ 	async upsert(sel, data, keys) {
+-		return upsert(this, sel, data, keys);
++		return this._access(async () => upsert(this, sel, data, keys));
+ 	}
+ 	async stats() {
+-		return collectStats(this);
++		return this._access(async () => collectStats(this));
+ 	}
+ 	async getIndexes(table) {
+-		return getIndexes(this, table);
++		return this._access(async () => getIndexes(this, table));
+ 	}
+ 	async createIndex(table, index) {
+-		return createIndex(this, table, index);
++		return this._access(async () => createIndex(this, table, index));
+ 	}
+ 	async dropIndex(_table, name) {
+-		return dropIndex(this, name);
++		return this._access(async () => dropIndex(this, name));
+ 	}
+ };
+ //#endregion
+diff --git a/src/index.ts b/src/index.ts
+index 5fbe1676185a2a1aec8d8b612b287c1ac85602d4..a41af73de01b40230aa6536ddad5b9599b0f2dee 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -86,7 +86,9 @@ export class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+ 	 * 事务，但前者必须排队、后者并入，否则 SAVEPOINT 会被外层
+ 	 * COMMIT 摧毁、或经队列等待自己而死锁。
+ 	 */
+-	private _txDomain = new AsyncLocalStorage<boolean>();
++	private _txDomain = new AsyncLocalStorage<{ active: boolean; failure?: { error: unknown } }>();
++	/** Supplied by Minato on its transaction-bound driver proxy. */
++	declare readonly session?: { active: boolean; failure?: { error: unknown } };
+ 
+ 	/** 建立连接，并注册自定义 SQL 函数与类型 transformer（见 setup/）。 */
+ 	async start() {
+@@ -121,10 +123,22 @@ export class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+ 		}
+ 	}
+ 
++	private _closing = false;
++	private _stopTask?: Promise<void>;
+ 	async stop() {
+-		// 让出一拍事件循环，等挂起的微任务收尾后再关库
+-		await new Promise((resolve) => setTimeout(resolve, 0));
+-		this.db?.close();
++		if ((this.session?.active || this._txDomain.getStore()?.active)) throw new Error("cannot close inside transaction");
++		this._closing = true;
++		return this._stopTask ??= (async () => {
++			await this._transactionTask;
++			this.db?.close();
++			this._txDomain.disable();
++		})();
++	}
++	private async _access<T>(body: (session?: { active: boolean; failure?: { error: unknown } }) => Promise<T>): Promise<T> {
++		if (this.session?.failure) throw this.session.failure.error;
++		if (this.session && !this.session.active) throw new Error("transaction session expired");
++		if ((this.session?.active || this._txDomain.getStore()?.active)) return body();
++		return this._enqueueTransaction(body);
+ 	}
+ 
+ 	/**
+@@ -193,8 +207,21 @@ export class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+ 	 * 事务串行化：回调经 _enqueueTransaction 排队执行，整体运行在
+ 	 * 事务域标记内（域内的批量写会并入本事务而不是另开）。
+ 	 */
+-	async withTransaction(callback: () => Promise<void>) {
+-		return this._enqueueTransaction(callback);
++	async withTransaction(callback: (session?: { active: boolean; failure?: { error: unknown } }) => Promise<void>) {
++		let entered = false;
++		try {
++			if ((this.session?.active || this._txDomain.getStore()?.active)) throw new Error("nested transactions are not supported");
++			return await this._enqueueTransaction((session) => {
++				entered = true;
++				return callback(session);
++			});
++		} catch (error) {
++			// Minato awaits a session before calling CRUD; failed admission must settle it too.
++			if (!entered) {
++				try { await callback({ active: false, failure: { error } }); } catch {}
++			}
++			throw error;
++		}
+ 	}
+ 
+ 	/**
+@@ -205,8 +232,9 @@ export class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+ 	 * within a transaction"）。
+ 	 */
+ 	private _enqueueTransaction<T>(
+-		body: () => Promise<T>,
++		body: (session?: { active: boolean; failure?: { error: unknown } }) => Promise<T>,
+ 	): Promise<T> {
++		if (this._closing) return Promise.reject(new Error("database closing"));
+ 		let release!: () => void;
+ 		const gate = new Promise<void>(
+ 			(resolve) => (release = resolve),
+@@ -215,9 +243,10 @@ export class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+ 		this._transactionTask = gate;
+ 		return (async () => {
+ 			if (prev) await prev.catch(() => {});
++			const domain = { active: true };
+ 			try {
+ 				this._run("BEGIN TRANSACTION");
+-				const result = await this._txDomain.run(true, body);
++				const result = await this._txDomain.run(domain, () => body(domain));
+ 				this._run("COMMIT");
+ 				return result;
+ 			} catch (error) {
+@@ -226,6 +255,7 @@ export class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+ 				} catch {}
+ 				throw error;
+ 			} finally {
++				domain.active = false;
+ 				release();
+ 			}
+ 		})();
+@@ -242,47 +272,46 @@ export class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+ 	async runBatch<T>(
+ 		callback: () => Promise<T>,
+ 	): Promise<T> {
+-		if (this._txDomain.getStore()) return callback();
+-		return this._enqueueTransaction(callback);
++		return this._access(callback);
+ 	}
+ 
+ 	// ---- Driver 抽象方法的薄委托（实现体见 operations/ 与 stats.ts）----
+ 
+ 	async prepare(table: string, dropKeys?: string[]) {
+-		return schema.prepare(this, table, dropKeys);
++		return this._access(async () => schema.prepare(this, table, dropKeys));
+ 	}
+ 
+ 	/** 基类 migrate 为 protected，开公开桥供 schema 模块的 prepare 尾段调用。 */
+ 	runMigration(table: string, hooks: MigrationHooks) {
+-		return this.migrate(table, hooks);
++		return this._access(async () => this.migrate(table, hooks));
+ 	}
+ 
+ 	async drop(table: string) {
+-		return schema.drop(this, table);
++		return this._access(async () => schema.drop(this, table));
+ 	}
+ 
+ 	async dropAll() {
+-		return schema.dropAll(this);
++		return this._access(async () => schema.dropAll(this));
+ 	}
+ 
+ 	async remove(sel: Selection.Mutable) {
+-		return crud.remove(this, sel);
++		return this._access(async () => crud.remove(this, sel));
+ 	}
+ 
+ 	async get(sel: Selection.Immutable) {
+-		return crud.get(this, sel);
++		return this._access(async () => crud.get(this, sel));
+ 	}
+ 
+ 	async eval(sel: Selection.Immutable, expr: Eval.Expr) {
+-		return crud.evaluate(this, sel, expr);
++		return this._access(async () => crud.evaluate(this, sel, expr));
+ 	}
+ 
+ 	async set(sel: Selection.Mutable, update: object) {
+-		return crud.set(this, sel, update);
++		return this._access(async () => crud.set(this, sel, update));
+ 	}
+ 
+ 	async create(sel: Selection.Mutable, data: object) {
+-		return crud.create(this, sel, data);
++		return this._access(async () => crud.create(this, sel, data));
+ 	}
+ 
+ 	async upsert(
+@@ -290,23 +319,23 @@ export class SQLiteDriver extends Driver<SQLiteDriver.Config> {
+ 		data: Dict[],
+ 		keys: string[],
+ 	) {
+-		return crud.upsert(this, sel, data, keys);
++		return this._access(async () => crud.upsert(this, sel, data, keys));
+ 	}
+ 
+ 	async stats() {
+-		return collectStats(this);
++		return this._access(async () => collectStats(this));
+ 	}
+ 
+ 	async getIndexes(table: string) {
+-		return indexes.getIndexes(this, table);
++		return this._access(async () => indexes.getIndexes(this, table));
+ 	}
+ 
+ 	async createIndex(table: string, index: Driver.Index) {
+-		return indexes.createIndex(this, table, index);
++		return this._access(async () => indexes.createIndex(this, table, index));
+ 	}
+ 
+ 	async dropIndex(_table: string, name: string) {
+-		return indexes.dropIndex(this, name);
++		return this._access(async () => indexes.dropIndex(this, name));
+ 	}
+ }
+ 

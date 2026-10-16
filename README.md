@@ -1,23 +1,29 @@
 # Lamplit Post
 
-Post Office for Agents: one private backend for official QQ Bot and existing Matrix user accounts. Post stores observed messages and attachments permanently, applies each agent's admission and wake policy, exposes seven MCP tools, and durably delivers eligible wakes to a fixed receiver. Consumers own their execution sessions; QQ and Matrix can feed the same existing CFL session.
-
-V1 is backend-only. It uses stable Koishi/Satori, the published QQ 4.14.0 adapter, a local Matrix access-token adapter, Bun SQLite, private asset files, and a sealed credential vault. No Matrix Application Service registration or browser console is required.
+**One private IM backend connects QQ and Matrix conversations to an agent's existing execution session.** Post archives actual observations and media, applies admission and wake rules, exposes seven MCP tools, and durably delivers eligible wakes.
 
 ```sh
-bun install --frozen-lockfile
-bun run typecheck
-bun test
-bun run build
-bun dist/cli.js --help
+pnpm install --frozen-lockfile
+pnpm run build
+node dist/cli.cjs --help
+node dist/cli.cjs config-check --config examples/koishi.yml
 ```
 
-Start with [the operator guide](docs/operator.md) and [example TOML](examples/post.toml). First state initialization automatically creates the configured external master key if state is genuinely fresh; subsequent starts reuse it. Existing state with a lost key fails closed. Secrets enter through offline stdin provisioning; agent API tokens are independently issued/revoked. Help and configuration validation create no state.
+Post runs on Node 24 with one Koishi application root, one Post plugin/service, and one Minato SQLite provider. The published QQ adapter and custom Matrix user-access-token adapter share that root. Configuration lives in one Koishi YAML Post entry; the framework Schema describes its fields and Post validates cross-references and private paths. Credentials stay in the sealed vault with a separate external key. Machine agent tokens identify consumers independently of platform and receiver credentials.
 
-The [canonical consumer contract](contracts/v1/README.md), [executable schemas](contracts/v1/index.ts), and [concrete JSON examples](contracts/v1/examples.json) are the integration authority for CFL spec #4067. Contract revision is `ef2fa54ec90630bad5b38b2768a13b7bf543dc4c`. Raw authenticated upload/download routes let remote consumers use stable asset IDs without server-local paths. PostEventV1 retries preserve ID and serialized body; a receiver acknowledges only after durable acceptance.
+Start with [the operator guide](docs/operator.md) and [example configuration](examples/koishi.yml). Operator-verified native identities and private paths are required before connecting an account. Help, invalid arguments and read-only config checks do not initialize state or rewrite configuration. Configuration changes take effect through a coherent restart.
 
-Tests own their temporary HOME, SQLite, key files, HTTP/WS endpoints and credentials. QQ traffic uses the actual published adapter against an isolated gateway; Matrix uses the actual SDK against owned homeserver endpoints. The fake QQ gateway uses Node and the published `ws` server to avoid Bun's native test-server shim; Post production runs only Bun. Tests make no real IM requests or external messages.
+The [consumer contract](contracts/v1/README.md), [executable schemas](contracts/v1/index.ts), and [JSON examples](contracts/v1/examples.json) retain revision `ef2fa54ec90630bad5b38b2768a13b7bf543dc4c`. QQ and Matrix can feed the same CFL session. Receivers acknowledge only durable acceptance; retries preserve immutable event bytes. Unknown native sends remain unresolved and are never automatically resent.
 
-`bun run package` prepares the bundled CLI, example configuration, service template, license and operator guide under `dist/artifact`. Deployment and actual CFL cutover are a later Orc-owned action after independent review and merge. Building or merging does not install or start a service.
+```sh
+pnpm run typecheck
+pnpm test
+pnpm run build
+pnpm run package
+```
 
-Platform grants still determine what QQ can observe. QQ ordinary-group member listing is explicitly unsupported by this adapter's public API; it does not substitute channel rosters or remembered senders. Matrix access requires current joined plaintext rooms and a real roster; encrypted rooms are excluded. Audio/video remain retrievable attachments and outbound ordinary files. V1 has no frontend, Console, FTS, MCP Events, native audio/video codecs, or historical import.
+Packaging produces `dist/node-artifact` and `dist/lamplit-post-node24.tar.gz`, including framework dependencies, dynamic resources, revision metadata, operator docs and an inert service template. Node 24 is supplied separately. Tests use Node, Vitest, real MCP HTTP, the published QQ WS/REST adapter, the real Matrix SDK, and owned local fixtures. They include crash/reopen, extracted-artifact, private-peer, catchup, ordered-content, image-preflight and shared-deadline checks.
+
+The exact native provider compatibility decision and bounded transaction repair are documented in [framework persistence](docs/framework-persistence.md). Post has no Console/UI, human Auth pages, FTS, MCP Events, Matrix AS/E2EE, native codecs, legacy state migration, or separate database server. Audio/video remain attachments. Deployment remains paused and belongs to Orc after reviewed merge; building or merging does not install a service.
+
+Post is licensed under [AGPL-3.0](LICENSE). Its framework dependencies retain their own licenses; provider attribution is included with the patch documentation.

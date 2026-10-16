@@ -11,7 +11,7 @@ export async function stateFixture(
   const dir = await mkdtemp(join(tmpdir(), "post-state-"));
   const key = join(dir, "master.key");
   await writeFile(key, Buffer.alloc(32, 7), { mode: 0o600 });
-  const config = ConfigSchema.parse({
+  const config = ConfigSchema({
     data_dir: join(dir, "data"),
     master_key_file: key,
     port: 0,
@@ -69,27 +69,27 @@ export async function stateFixture(
       },
     ],
   });
-  const store = new Store(config);
-  store.putSecret(
+  const store = await Store.open(config);
+  await store.putSecret(
     "qq-secret",
     "qq-main",
     "platform",
     "test-qq-platform-secret",
   );
-  store.putSecret(
+  await store.putSecret(
     "matrix-secret",
     "matrix-main",
     "platform",
     "test-matrix-platform-secret",
   );
-  store.putSecret(
+  await store.putSecret(
     "receiver-secret",
     "cfl-binding",
     "receiver",
     "test-receiver",
   );
-  const token = store.issue("cfl");
-  store.close();
+  const token = await store.issue("cfl");
+  await store.close();
   return {
     dir,
     config,
@@ -99,10 +99,19 @@ export async function stateFixture(
     },
   };
 }
-export async function until(predicate: () => unknown, timeout = 3000) {
+export async function until(
+  predicate: () => unknown | Promise<unknown>,
+  timeout = 3000,
+) {
   const end = Date.now() + timeout;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() > end) throw new Error("Condition timed out");
-    await Bun.sleep(10);
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+export async function count(db: any, table: string) {
+  if (table === "inbox")
+    return db.prepare("SELECT count(*) n FROM inbox").get().n as number;
+  return (await db.get("post_" + table, {})).length as number;
 }

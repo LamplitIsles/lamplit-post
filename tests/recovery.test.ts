@@ -1,4 +1,5 @@
-import { test, expect } from "bun:test";
+import { count } from "./fixtures/state";
+import { test, expect } from "vitest";
 import { Store } from "../src/store";
 import { Service } from "../src/service";
 import { start } from "../src/runtime";
@@ -50,32 +51,36 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
       receiver_url: second.url,
       receiver_credential: "receiver-2",
     });
-    store = new Store(s.config);
-    store.issue("second");
-    store.putSecret("receiver-2", "second", "receiver", "test-receiver");
+    store = await Store.open(s.config);
+    await store.issue("second");
+    await store.putSecret("receiver-2", "second", "receiver", "test-receiver");
     service = new Service(store);
     ready(service);
-    service.observe("qq-main", event("once"));
-    service.observe("qq-main", event("once"));
-    expect(
-      (store.db.query("SELECT count(*) n FROM messages").get() as any).n,
-    ).toBe(1);
-    expect(
-      (store.db.query("SELECT count(*) n FROM deliveries").get() as any).n,
-    ).toBe(2);
+    await service.observe("qq-main", event("once"));
+    await service.observe("qq-main", event("once"));
+    expect(({ n: await count(store.db, "messages") } as any).n).toBe(1);
+    expect(({ n: await count(store.db, "deliveries") } as any).n).toBe(2);
     const body = (
-      store.db
-        .query("SELECT body FROM deliveries WHERE binding=?")
-        .get(binding.id) as any
+      (
+        await store.db.get(
+          "post_deliveries",
+          { binding: binding.id },
+          { fields: ["body"] },
+        )
+      )[0] as any
     ).body;
     const oldUrl = binding.receiver_url;
     binding.receiver_url = second.url;
     await service.dispatch(binding);
     expect(
       (
-        store.db
-          .query("SELECT state FROM deliveries WHERE binding=?")
-          .get(binding.id) as any
+        (
+          await store.db.get(
+            "post_deliveries",
+            { binding: binding.id },
+            { fields: ["state"] },
+          )
+        )[0] as any
       ).state,
     ).toBe("held");
     expect(second.attempts).toHaveLength(0);
@@ -83,26 +88,28 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
     expect(second.attempts).toHaveLength(1);
     expect(receiver.attempts).toHaveLength(0);
     await service.stop();
-    store.close();
+    await store.close();
     binding.receiver_url = oldUrl;
-    store = new Store(s.config);
+    store = await Store.open(s.config);
     service = new Service(store);
     ready(service);
     await service.dispatch(binding);
     expect(receiver.attempts[0]).toBe(body);
-    service.observe("qq-main", event("revoked"));
-    store.db.run("DELETE FROM tokens WHERE agent=?", ["cfl"]);
+    await service.observe("qq-main", event("revoked"));
+    await store.revoke("cfl");
     await service.dispatch(binding);
     expect(
-      store.db
-        .query(
-          "SELECT state,category FROM deliveries WHERE binding=? ORDER BY seq DESC LIMIT 1",
+      (
+        await store.db.get(
+          "post_deliveries",
+          { binding: binding.id },
+          { fields: ["state", "category"], sort: { seq: "desc" }, limit: 1 },
         )
-        .get(binding.id) as any,
-    ).toEqual({ state: "cancelled", category: "scope_revoked" });
+      )[0] as any,
+    ).toEqual({ state: "cancelled", category: "agent_revoked" });
   } finally {
     await service?.stop();
-    store?.close();
+    await store?.close();
     await receiver.close();
     await second.close();
     await s.close();
@@ -111,24 +118,20 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
 test("queue saturation rolls back message and wake together and exposes capture stop", async () => {
   const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
   s.config.backlog_limit = 1;
-  const store = new Store(s.config),
+  const store = await Store.open(s.config),
     service = new Service(store);
   try {
-    service.observe("qq-main", event("first"));
-    expect(() => service.observe("qq-main", event("over-capacity"))).toThrow();
-    expect(
-      (store.db.query("SELECT count(*) n FROM messages").get() as any).n,
-    ).toBe(1);
-    expect(
-      (store.db.query("SELECT count(*) n FROM deliveries").get() as any).n,
-    ).toBe(1);
-    expect(service.status().healthy).toBe(false);
-    expect((store.db.query("SELECT count(*) n FROM gaps").get() as any).n).toBe(
-      1,
-    );
+    await service.observe("qq-main", event("first"));
+    await expect(
+      service.observe("qq-main", event("over-capacity")),
+    ).rejects.toBeDefined();
+    expect(({ n: await count(store.db, "messages") } as any).n).toBe(1);
+    expect(({ n: await count(store.db, "deliveries") } as any).n).toBe(1);
+    expect((await service.status()).healthy).toBe(false);
+    expect(({ n: await count(store.db, "gaps") } as any).n).toBe(1);
   } finally {
     await service.stop();
-    store.close();
+    await store.close();
     await s.close();
   }
 });
@@ -149,9 +152,8 @@ test("actual platform restart stores initial catchup without waking and reopens 
     ]);
     r = await start(s.config, { qqOrigin: p.url, qqGateway: p.gateway });
     await until(
-      () =>
-        (r!.store.db.query("SELECT count(*) n FROM messages").get() as any)
-          .n === 1,
+      async () =>
+        (({ n: await count(r!.store.db, "messages") }) as any).n === 1,
     );
     expect(receiver.attempts).toHaveLength(0);
     const asset = await r.service.assets.ingest(
@@ -169,16 +171,17 @@ test("actual platform restart stores initial catchup without waking and reopens 
     };
     const result = await r.service.call("cfl", "send_message", args);
     expect(result.status).toBe("sent");
-    r.store.db.run("INSERT INTO sends VALUES (?,?,?,NULL)", [
-      "cfl",
-      "crash-pending",
-      JSON.stringify({
+    await r.store.db.create("post_sends", {
+      agent: "cfl",
+      request: "crash-pending",
+      input: JSON.stringify({
         account_id: "qq-main",
         conversation_id: "qq-group",
         request_id: "crash-pending",
         content: [{ type: "text", text: "pending" }],
       }),
-    ]);
+      result: null,
+    });
     await r.stop();
     r = undefined;
     r = await start(s.config, { qqOrigin: p.url, qqGateway: p.gateway });
@@ -217,10 +220,10 @@ test("stalled QQ token acquisition cancels actual HTTP and releases startup owne
       start(s.config, { qqOrigin: p.url, qqGateway: p.gateway }),
     ).rejects.toThrow();
     expect(Date.now() - before).toBeLessThan(1500);
-    await until(() => p.aborts > 0);
+    await until(async () => p.aborts > 0);
     expect(p.sendCount).toBe(0);
-    const store = new Store(s.config);
-    store.close();
+    const store = await Store.open(s.config);
+    await store.close();
   } finally {
     await p.close();
     await s.close();

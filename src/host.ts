@@ -1,7 +1,7 @@
 import { boundedBytes } from "./io";
-import HTTP from "@cordisjs/plugin-http";
+import { HTTP } from "@koishijs/plugin-http";
 import { Context, Logger, h } from "@koishijs/core";
-import QQ from "@koishijs/plugin-adapter-qq";
+import { QQBot as QQ } from "@koishijs/plugin-adapter-qq";
 import { decodeGroupMessage, type QQBot } from "@satorijs/adapter-qq";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { MatrixUserBot } from "./matrix";
@@ -10,23 +10,27 @@ import type { AccountConfig, Scope } from "./config";
 import type { Service } from "./service";
 import type { ContentV1, MessageV1 } from "../contracts/v1/index";
 import { need } from "./errors";
-/** Native endpoint replacements exist only as an injected test seam, never in TOML/API. */
+/** Native endpoint replacements exist only as an injected test seam, never in YAML/API. */
 export interface TransportFixture {
   qqOrigin?: string;
   qqGateway?: string;
 }
 export class Host {
   sockets = new Set<any>();
+  nativeBots = new Set<{ stop(): Promise<unknown> }>();
   forks: any[] = [];
-  ctx = new Context();
+  ctx: Context;
   operations = new AsyncLocalStorage<AbortSignal>();
   constructor(
     public service: Service,
     public fixture: TransportFixture = {},
+    root: Context,
   ) {
+    this.ctx = root;
     // Upstream loggers can include raw request/response bodies. Only Post safe categories are exported.
     Logger.targets = [];
-    this.ctx.plugin(HTTP, { timeout: service.config.timeout_ms });
+    if (!this.ctx.http)
+      this.ctx.plugin(HTTP, { timeout: service.config.timeout_ms });
     this.ctx.http.defaultDecoder = async (response) =>
       JSON.parse(
         new TextDecoder().decode(
@@ -67,19 +71,23 @@ export class Host {
   }
   async start() {
     for (const config of this.service.config.accounts) {
-      const secret = this.service.store.secret(
+      this.service.stopSignal.signal.throwIfAborted();
+      const secret = await this.service.store.secret(
         config.credential,
         config.id,
         "platform",
       );
+      this.service.stopSignal.signal.throwIfAborted();
       if (config.platform === "matrix") {
         this.forks.push(
           this.ctx.plugin((ctx: Context) => {
             const bot = new MatrixUserBot(ctx, config, this.service, secret);
+            this.nativeBots.add(bot);
             this.service.platforms.set(config.id, bot);
           }),
         );
       } else {
+        const existing = new Set(this.ctx.bots);
         this.forks.push(
           this.ctx.plugin(QQ as any, {
             id: config.native_id,
@@ -97,9 +105,12 @@ export class Host {
             timeout: this.service.config.timeout_ms,
           }),
         );
+        for (const bot of this.ctx.bots)
+          if (!existing.has(bot)) this.nativeBots.add(bot);
       }
     }
-    await this.ctx.start();
+
+    this.service.stopSignal.signal.throwIfAborted();
     for (const config of this.service.config.accounts) {
       if (config.platform === "qq") {
         const bot = this.ctx.bots.find(
@@ -123,10 +134,11 @@ export class Host {
     const signal = this.service.signal();
     while ([...this.service.platforms.values()].some((p) => !p.ready)) {
       signal.throwIfAborted();
-      await Bun.sleep(10);
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
   async stop() {
+    await Promise.allSettled([...this.nativeBots].map((bot) => bot.stop()));
     await Promise.all(
       [...this.sockets].map(
         (socket) =>
@@ -153,10 +165,7 @@ export class Host {
     );
     for (const fork of this.forks.reverse()) {
       fork.dispose();
-      await this.ctx.lifecycle.flush();
     }
-    await this.ctx.stop();
-    await this.ctx.lifecycle.flush();
   }
 }
 class QQPlatform implements Platform {
@@ -186,7 +195,9 @@ class QQPlatform implements Platform {
       ) {
         if (bot.status === 1) this.startedAt = Date.now();
         else if (!this.stopped)
-          host.service.store.gap(config.id, "connection_gap");
+          void host.service
+            .track(host.service.store.gap(config.id, "connection_gap"))
+            .catch(() => {});
       }
     });
   }
@@ -197,15 +208,18 @@ class QQPlatform implements Platform {
     const signal = this.service.signal();
     while (this.bot.status !== 1) {
       signal.throwIfAborted();
-      await Bun.sleep(10);
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    this.service.store.pin(this.config.id, "qq", this.config.native_id);
+    await this.service.store.pin(this.config.id, "qq", this.config.native_id);
     return;
   }
   async stop() {
     this.stopped = true;
-    await this.bot.stop();
-    await this.chain;
+    try {
+      await this.bot.stop();
+    } finally {
+      await this.chain;
+    }
   }
   async check(_scope: Scope, signal: AbortSignal) {
     signal.throwIfAborted();
@@ -218,7 +232,9 @@ class QQPlatform implements Platform {
     if (this.stopped) return;
     if (++this.pending > 100) {
       this.service.errors.set(this.config.id, "capture_capacity");
-      this.service.store.gap(this.config.id, "capture_capacity");
+      void this.service
+        .track(this.service.store.gap(this.config.id, "capture_capacity"))
+        .catch(() => {});
       void this.stop();
       return;
     }
@@ -288,7 +304,7 @@ class QQPlatform implements Platform {
             signal,
           );
         } catch {
-          asset = this.service.assets.unavailable(
+          asset = await this.service.assets.unavailable(
             mime,
             "attachment",
             "download_unavailable",
@@ -320,7 +336,7 @@ class QQPlatform implements Platform {
       reply_native_id: replyId,
       catchup: session.timestamp < this.startedAt,
     };
-    this.service.observe(this.config.id, o);
+    await this.service.observe(this.config.id, o);
   }
   async send(
     scope: Scope,
@@ -345,7 +361,7 @@ class QQPlatform implements Platform {
       else if (part.type === "mention")
         fragment = h.text(`<@${part.native_user_id}>`);
       else {
-        const meta = this.service.assets.metadata(part.asset_id);
+        const meta = await this.service.assets.metadata(part.asset_id);
         const bytes = await this.service.assets.bytes(part.asset_id, signal);
         fragment = h(part.type === "image" ? "img" : "file", {
           src: `data:${meta.mime};base64,${bytes.toString("base64")}`,

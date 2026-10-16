@@ -110,7 +110,9 @@ export class MatrixUserBot
           return;
         if (++this.pending > 100) {
           this.service.errors.set(config.id, "capture_capacity");
-          this.service.store.gap(config.id, "capture_capacity");
+          void this.service
+            .track(this.service.store.gap(config.id, "capture_capacity"))
+            .catch(() => {});
           this.client.stopClient();
           this.ready = false;
           return;
@@ -134,7 +136,7 @@ export class MatrixUserBot
       this.client.whoami(),
     );
     need(identity.user_id === this.config.native_id, "conflict");
-    this.service.store.pin(this.config.id, "matrix", identity.user_id);
+    await this.service.store.pin(this.config.id, "matrix", identity.user_id);
     await this.client.startClient({ initialSyncLimit: 20 });
     return;
   }
@@ -189,7 +191,10 @@ export class MatrixUserBot
     const encrypted =
       room.hasEncryptionStateEvent() || event.getType() === "m.room.encrypted";
     if (encrypted) {
-      this.service.store.gap(this.config.id, "encrypted_room_unsupported");
+      await this.service.store.gap(
+        this.config.id,
+        "encrypted_room_unsupported",
+      );
       return;
     }
     const content: ContentV1[] = [],
@@ -234,7 +239,7 @@ export class MatrixUserBot
           signal,
         );
       } catch {
-        asset = this.service.assets.unavailable(
+        asset = await this.service.assets.unavailable(
           mime,
           String(c.body ?? "attachment").slice(0, 255),
           "download_unavailable",
@@ -279,7 +284,7 @@ export class MatrixUserBot
       mutation,
       catchup,
     };
-    this.service.observe(this.config.id, o);
+    await this.service.observe(this.config.id, o);
     const session = this.session({
       type: mutation ? "message-updated" : "message",
       timestamp: o.timestamp,
@@ -317,7 +322,7 @@ export class MatrixUserBot
           "m.mentions": { user_ids: [part.native_user_id] },
         };
       else {
-        const meta = this.service.assets.metadata(part.asset_id),
+        const meta = await this.service.assets.metadata(part.asset_id),
           data = await this.service.assets.bytes(part.asset_id, signal);
         signal.throwIfAborted();
         onDispatch();

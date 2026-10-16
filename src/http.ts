@@ -13,8 +13,7 @@ import { ToolInputs, ToolOutputs } from "../contracts/v1/index";
 import { Service } from "./service";
 import { Fault } from "./errors";
 export async function serve(service: Service) {
-  // Bun's Fetch server cancels a body reader but leaves a dripping connection open.
-  // Its node:http API lets us stop body reading, flush an error, and destroy that request.
+  // Own the actual request socket so a shared body deadline closes dripping I/O.
   const server = createServer((incoming, outgoing) => {
     const disconnected = new AbortController();
     const abort = () => disconnected.abort();
@@ -63,6 +62,7 @@ export async function serve(service: Service) {
             headers: incoming.headers as HeadersInit,
             body: method === "GET" || method === "HEAD" ? undefined : body(),
             signal: disconnected.signal,
+            ...{ duplex: "half" },
           },
         );
         const response = await handle(req);
@@ -98,7 +98,7 @@ export async function serve(service: Service) {
     const path = new URL(req.url).pathname;
     if (path === "/healthz") {
       try {
-        const healthy = service.status().healthy;
+        const healthy = (await service.status()).healthy;
         return Response.json({ healthy }, { status: healthy ? 200 : 503 });
       } catch {
         return Response.json({ healthy: false }, { status: 503 });
@@ -223,8 +223,8 @@ export async function serve(service: Service) {
           req.signal,
         );
         if (meta.status !== "available") throw new Fault("not_found");
-        const row = service.assets.row(id)!;
-        return new Response(Bun.file(service.assets.path(row.storage!)), {
+        const row = (await service.assets.row(id))!;
+        return new Response(await service.assets.bytes(id, req.signal), {
           headers: {
             "Content-Type": meta.mime,
             "Content-Length": String(meta.size),

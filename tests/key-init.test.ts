@@ -1,91 +1,104 @@
-import { test, expect } from "bun:test";
-import { mkdtemp, rm, readFile, writeFile, stat } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { test, expect } from "vitest";
+import { readFile, writeFile, rm, stat, access } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { stringify } from "yaml";
 import { Store } from "../src/store";
 import { stateFixture } from "./fixtures/state";
-test("fresh state publishes private external key once; restart reuses bytes; missing existing key never regenerates", async () => {
+import { processFixture } from "./fixtures/process";
+test("fresh private external key is idempotent and missing existing key fails closed", async () => {
   const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
+  let store: Store | undefined;
+  const config = {
+    ...s.config,
+    data_dir: join(s.dir, "fresh"),
+    master_key_file: join(s.dir, "keys", "master"),
+  };
   try {
-    const config = {
-      ...s.config,
-      data_dir: join(s.dir, "fresh"),
-      master_key_file: join(s.dir, "private", "key"),
-    };
-    let store = new Store(config);
-    const first = await readFile(config.master_key_file);
-    expect(first.length).toBe(32);
+    store = await Store.open(config);
+    const bytes = await readFile(config.master_key_file);
+    expect(bytes.length).toBe(32);
     expect((await stat(config.master_key_file)).mode & 0o077).toBe(0);
-    expect((await stat(join(s.dir, "private"))).mode & 0o077).toBe(0);
-    store.putSecret("example", "account", "platform", "secret");
-    store.close();
-    store = new Store(config);
-    expect(await readFile(config.master_key_file)).toEqual(first);
-    expect(store.secret("example", "account", "platform")).toBe("secret");
-    store.close();
+    expect((await stat(join(s.dir, "keys"))).mode & 0o077).toBe(0);
+    await store.putSecret("example", "account", "platform", "secret");
+    await store.close();
+    store = await Store.open(config);
+    expect(await readFile(config.master_key_file)).toEqual(bytes);
+    expect(await store.secret("example", "account", "platform")).toBe("secret");
+    await store.close();
     await rm(config.master_key_file);
-    expect(() => new Store(config)).toThrow();
-    expect(await Bun.file(config.master_key_file).exists()).toBe(false);
+    await expect(Store.open(config)).rejects.toBeDefined();
+    await expect(access(config.master_key_file)).rejects.toBeDefined();
     await writeFile(config.master_key_file, Buffer.alloc(31), { mode: 0o600 });
-    expect(() => new Store(config)).toThrow();
+    await expect(Store.open(config)).rejects.toBeDefined();
     expect((await readFile(config.master_key_file)).length).toBe(31);
   } finally {
+    await store?.close();
     await s.close();
   }
 });
-test("exclusive ownership refuses competing initialization without touching the winner key", async () => {
+test("exclusive owner refuses competing initialization without touching key", async () => {
   const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
+  let store: Store | undefined;
   try {
-    const config = {
-      ...s.config,
-      data_dir: join(s.dir, "fresh"),
-      master_key_file: join(s.dir, "key"),
-    };
-    const store = new Store(config);
-    const bytes = await readFile(config.master_key_file);
-    expect(() => new Store(config)).toThrow();
-    expect(await readFile(config.master_key_file)).toEqual(bytes);
-    store.close();
+    store = await Store.open(s.config);
+    const bytes = await readFile(s.config.master_key_file);
+    await expect(Store.open(s.config)).rejects.toBeDefined();
+    expect(await readFile(s.config.master_key_file)).toEqual(bytes);
   } finally {
+    await store?.close();
     await s.close();
   }
 });
-
-test("simultaneous fresh processes share one published key or refuse; no losing-key ciphertext", async () => {
+test("simultaneous fresh Node processes publish one key or refuse; no losing-key ciphertext", async () => {
   const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
+  let store: Store | undefined;
+  const config = {
+    ...s.config,
+    data_dir: join(s.dir, "race"),
+    master_key_file: join(s.dir, "race-keys", "master"),
+  };
+  const path = join(s.dir, "koishi.yml");
+  await writeFile(
+    path,
+    stringify({
+      daemon: { autoRestart: false },
+      plugins: { [resolve("dist/post-plugin.cjs")]: config },
+    }),
+    { mode: 0o600 },
+  );
+  const args = [
+    resolve("dist/cli.cjs"),
+    "credential-put",
+    "--config",
+    path,
+    "--ref",
+    "qq-secret",
+    "--account",
+    "qq-main",
+    "--kind",
+    "platform",
+  ];
+  const options = {
+    cwd: s.dir,
+    env: { ...process.env, HOME: s.dir },
+    input: "same-secret\n",
+  };
+  const a = processFixture(args, options),
+    b = processFixture(args, options);
   try {
-    const config = {
-      ...s.config,
-      data_dir: join(s.dir, "race"),
-      master_key_file: join(s.dir, "race-keys", "key"),
-    };
-    const entry = join(s.dir, "initialize.ts");
-    const modulePath = new URL("../src/store.ts", import.meta.url).pathname;
-    await writeFile(
-      entry,
-      `import {Store} from ${JSON.stringify(modulePath)};const config=JSON.parse(process.env.POST_TEST_CONFIG!);try{const s=new Store(config);s.putSecret('race','a','platform','same-secret');await Bun.sleep(100);s.close();}catch{process.exitCode=1;}`,
-    );
-    const spawn = () =>
-      Bun.spawn(["bun", entry], {
-        env: {
-          ...process.env,
-          POST_TEST_CONFIG: JSON.stringify(config),
-          HOME: join(s.dir, "home"),
-        },
-        stdout: "ignore",
-        stderr: "pipe",
-      });
-    const a = spawn(),
-      b = spawn();
     const results = await Promise.all([a.exited, b.exited]);
-    expect(results).toContain(0);
-    expect(results.every((code) => code === 0 || code === 1)).toBe(true);
+    expect(results.some((x) => x.code === 0)).toBe(true);
+    expect(results.every((x) => x.code === 0 || x.code === 1)).toBe(true);
     const key = await readFile(config.master_key_file);
-    const store = new Store(config);
-    expect(store.secret("race", "a", "platform")).toBe("same-secret");
-    store.close();
+    store = await Store.open(config);
+    expect(await store.secret("qq-secret", "qq-main", "platform")).toBe(
+      "same-secret",
+    );
     expect(await readFile(config.master_key_file)).toEqual(key);
   } finally {
+    a.kill("SIGKILL");
+    b.kill("SIGKILL");
+    await store?.close();
     await s.close();
   }
 });

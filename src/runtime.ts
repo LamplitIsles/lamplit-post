@@ -1,41 +1,237 @@
-import type { Config } from "./config";
+import type {} from "@koishijs/loader";
+import { Context, Logger, Service as FrameworkService } from "@koishijs/core";
+import SQLite from "@koishi-ce/plugin-database-sqlite";
+import { resolve, join } from "node:path";
+import { chmodSync } from "node:fs";
+import { ConfigSchema, type Config as PostConfig } from "./config";
+import { Ownership } from "./ownership";
+import { models, type PostDatabase } from "./models";
 import { Store } from "./store";
 import { Service } from "./service";
-import { Host, TransportFixture } from "./host";
+import { Host, type TransportFixture } from "./host";
 import { serve } from "./http";
-export async function start(config: Config, fixture?: TransportFixture) {
-  const store = new Store(config);
-  let service: Service | undefined, host: Host | undefined;
-  try {
-    service = new Service(store);
-    host = new Host(service, fixture);
-    await host.start();
-    service.startDispatch();
-    const http = await serve(service);
-    const runningService = service,
-      runningHost = host;
-    return {
-      store,
-      service: runningService,
-      host: runningHost,
-      http,
-      async stop() {
-        try {
-          await http.stop();
-          await runningService.stop();
-          await runningHost.stop();
-        } finally {
-          store.close();
-        }
-      },
-    };
-  } catch (e) {
-    try {
-      await service?.stop();
-      await host?.stop();
-    } finally {
-      store.close();
-    }
-    throw e;
+/** Framework extension surface; Post's domain and I/O share this root's provider. */
+export class Post extends FrameworkService {
+  constructor(
+    ctx: Context,
+    public store: Store,
+    public domain: Service,
+  ) {
+    super(ctx, "post", true);
   }
+}
+export interface Running {
+  context: Context;
+  store: Store;
+  service: Service;
+  host?: Host;
+  http?: Awaited<ReturnType<typeof serve>>;
+  stop(): Promise<void>;
+}
+interface Options {
+  connect: boolean;
+  fixture?: TransportFixture;
+  ready?: (running: Running) => void;
+  failed?: (error: unknown) => void;
+  cleanup?: (stop: () => Promise<void>) => void;
+}
+export function postPlugin(options: Options) {
+  return {
+    name: "post",
+    inject: ["model"],
+    Config: ConfigSchema,
+    apply(ctx: Context, raw: PostConfig) {
+      Logger.targets = [];
+      let owner: Ownership;
+      try {
+        const base = ctx.baseDir ?? process.cwd();
+        const config = {
+          ...raw,
+          data_dir: resolve(base, raw.data_dir),
+          master_key_file: resolve(base, raw.master_key_file),
+        };
+        owner = new Ownership(config);
+        models(ctx);
+        let store: Store | undefined,
+          domain: Service | undefined,
+          host: Host | undefined,
+          http: Running["http"];
+        let startupTask: Promise<void> | undefined;
+        let stopping = false,
+          workStop: Promise<void> | undefined,
+          stopTask: Promise<void> | undefined;
+        let provider: PostSQLite | undefined,
+          providerStart: Promise<void> | undefined,
+          providerStop: Promise<void> | undefined;
+        const stopWork = () => {
+          stopping = true;
+          return (workStop ??= (async () => {
+            const currentHTTP = http;
+            await currentHTTP?.stop();
+            await domain?.stop();
+            await host?.stop();
+            // Startup retains ownership until every in-flight resource acquisition settles.
+            await startupTask?.catch(() => {});
+            if (http !== currentHTTP) await http?.stop();
+          })());
+        };
+        const stop = () =>
+          (stopTask ??= (async () => {
+            await stopWork();
+            await provider?.stop();
+            owner.close();
+          })());
+        options.cleanup?.(stop);
+        ctx.on("exit", stop);
+        ctx.on("dispose", stop, true);
+        // Public provider hooks keep schema identification and actual I/O cleanup under one owner.
+        class PostSQLite extends SQLite {
+          async start() {
+            if (stopping) throw new Error("Post stopped during startup");
+            provider = this;
+            providerStart = (async () => {
+              await super.start();
+              if (owner.fresh)
+                this.db.exec(
+                  "PRAGMA application_id=1347375956; PRAGMA user_version=1;",
+                );
+            })();
+            return providerStart.catch(async (error) => {
+              await stop();
+              options.failed?.(error);
+              throw error;
+            });
+          }
+          async stop() {
+            return (providerStop ??= (async () => {
+              await stopWork();
+              await providerStart?.catch(() => {});
+              await super.stop();
+            })());
+          }
+        }
+        ctx.plugin(PostSQLite, { path: join(config.data_dir, "post.sqlite") });
+        ctx.inject(["database"], (injected) => {
+          injected.on("ready", () => {
+            startupTask = (async () => {
+              chmodSync(join(config.data_dir, "post.sqlite"), 0o600);
+              store = new Store(
+                config,
+                injected.database as unknown as PostDatabase,
+                owner,
+              );
+              store.close = async () => {
+                await stop();
+                await ctx.root.stop();
+              };
+              await store.initialize();
+              if (stopping) throw new Error("Post stopped during startup");
+              domain = new Service(store);
+              await domain.seedConversations();
+              if (stopping) throw new Error("Post stopped during startup");
+              new Post(injected, store, domain);
+              if (options.connect) {
+                host = new Host(domain, options.fixture, ctx.root);
+                await host.start();
+                if (stopping) throw new Error("Post stopped during startup");
+                await domain.startDispatch();
+                if (stopping) throw new Error("Post stopped during startup");
+                http = await serve(domain);
+                if (stopping) throw new Error("Post stopped during startup");
+              }
+              const status =
+                options.connect && !options.ready
+                  ? await domain.status()
+                  : undefined;
+              if (stopping) throw new Error("Post stopped during startup");
+              options.ready?.({
+                context: ctx.root,
+                store,
+                service: domain,
+                host,
+                http,
+                stop: store.close,
+              });
+              if (options.connect && !options.ready)
+                console.log(
+                  JSON.stringify({
+                    ready: true,
+                    url: http!.url,
+                    status,
+                  }),
+                );
+            })();
+            return startupTask.catch(async (error) => {
+              await stop();
+              options.failed?.(error);
+              throw error;
+            });
+          });
+        });
+      } catch (error) {
+        options.failed?.(error);
+        throw error;
+      }
+    },
+  };
+}
+export const name = "post";
+export const Config = ConfigSchema;
+export const inject = ["model"];
+export function apply(ctx: Context, config: PostConfig) {
+  return postPlugin({
+    connect: true,
+    failed: () => {
+      process.exitCode = 1;
+    },
+  }).apply(ctx, config);
+}
+async function application(
+  config: PostConfig,
+  connect: boolean,
+  fixture?: TransportFixture,
+) {
+  const ctx = new Context();
+  let cleanup: (() => Promise<void>) | undefined;
+  let ready!: (r: Running) => void, failed!: (e: unknown) => void;
+  const pending = new Promise<Running>((resolve, reject) => {
+    ready = resolve;
+    failed = reject;
+  });
+  const timeout = setTimeout(
+    () => failed(new Error("Post startup unavailable")),
+    config.timeout_ms + 1000,
+  );
+  try {
+    ctx.plugin(
+      postPlugin({
+        connect,
+        fixture,
+        ready,
+        failed,
+        cleanup: (stop) => {
+          cleanup = stop;
+        },
+      }),
+      config,
+    );
+    const [, running] = await Promise.all([ctx.start(), pending]);
+    return running;
+  } catch (error) {
+    await cleanup?.();
+    await ctx.stop();
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+export async function openStore(config: PostConfig) {
+  return (await application(config, false)).store;
+}
+export async function start(config: PostConfig, fixture?: TransportFixture) {
+  const running = await application(config, true, fixture);
+  return running as Running & {
+    host: Host;
+    http: NonNullable<Running["http"]>;
+  };
 }

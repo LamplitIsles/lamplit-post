@@ -30,7 +30,7 @@ Content is ordered. `text` has text, `mention` has exact native_user_id, attachm
 
 `POST /assets` accepts **raw bytes**, Content-Type required, optional `X-Post-Filename` (display name only). Returns 201 JSON Asset; upload ownership is this authenticated agent. Default maximum 16 MiB and request timeout 30s; 413 over limit, 415 invalid MIME/image bytes, 408 timeout. No multipart or base64 envelope. Available Asset has opaque asset_id, MIME, display name, exact size, status available, and relative download_path `/assets/<asset_id>`. Use the configured Post base URL, never resolve an arbitrary remote origin. `GET /assets/<asset_id>` returns bytes with Content-Type, Content-Length, Content-Disposition attachment and private/no-store caching. Asset metadata from tools uses the same shape. Unavailable attachments have size/download_path null and a safe reason; do not try to fetch invented bytes. Reads and reuse on send check source message admission (or upload ownership) independently of knowing the ID. Assets persist across restart.
 
-Example helper: `POST_TOKEN_FILE=/private/agent-token bun dist/cli.js asset-upload --url http://127.0.0.1:8787 --file ./picture.png`. Token may instead be in POST_TOKEN. Never pass token via argv.
+Example helper: `POST_TOKEN_FILE=/private/agent-token node dist/cli.cjs asset-upload --url http://127.0.0.1:8787 --file ./picture.png`. Token may instead be in POST_TOKEN. Never pass token via argv.
 
 ## Webhook PostEventV1
 
@@ -42,4 +42,4 @@ QQ and Matrix deliveries for the same agent feed the consumer's existing **singl
 
 ## Fixtures
 
-`examples.json` contains concrete event, all seven calls/results, upload and error examples. `tests/fixtures/consumer.ts` creates a test-owned loopback receiver with a test-owned SQLite inbox and asset bytes; it supports a first-attempt outage and durable dedupe. It performs no external requests or consumer implementation. Run `bun test tests/contract.test.ts`.
+`examples.json` contains concrete event, all seven calls/results, upload and error examples. `tests/fixtures/consumer.ts` creates a test-owned loopback receiver with a test-owned SQLite inbox and asset bytes; it supports a first-attempt outage and durable dedupe. It performs no external requests or consumer implementation. Run `pnpm exec vitest run tests/contract.test.ts`.

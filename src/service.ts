@@ -1,3 +1,4 @@
+import { $ } from "minato";
 import { createHmac } from "node:crypto";
 import { Config, Binding, Scope } from "./config";
 import { Store, opaque, digest } from "./store";
@@ -23,30 +24,33 @@ export class Service {
   closed = false;
   constructor(public store: Store) {
     this.assets = new Assets(store);
-    this.seedConversations();
   }
   get config() {
     return this.store.config;
   }
-  seedConversations() {
-    for (const b of this.config.bindings)
-      for (const s of b.scopes) {
-        const r = this.store.db
-          .query("SELECT * FROM conversations WHERE id=?")
-          .get(s.conversation_id) as any;
-        if (r)
-          need(
-            r.account === s.account_id &&
-              r.native === s.native_id &&
-              r.type === s.type,
-            "conflict",
-          );
-        else
-          this.store.db.run(
-            "INSERT OR IGNORE INTO conversations(id,account,native,type) VALUES (?,?,?,?)",
-            [s.conversation_id, s.account_id, s.native_id, s.type],
-          );
-      }
+  async seedConversations() {
+    await this.store.db.transact(async (db) => {
+      for (const b of this.config.bindings)
+        for (const scope of b.scopes) {
+          const r = (
+            await db.get("post_conversations", { id: scope.conversation_id })
+          )[0];
+          if (r)
+            need(
+              r.account === scope.account_id &&
+                r.native === scope.native_id &&
+                r.type === scope.type,
+              "conflict",
+            );
+          else
+            await db.create("post_conversations", {
+              id: scope.conversation_id,
+              account: scope.account_id,
+              native: scope.native_id,
+              type: scope.type,
+            });
+        }
+    });
   }
   track<T>(p: Promise<T>): Promise<T> {
     this.jobs.add(p);
@@ -61,9 +65,7 @@ export class Service {
     ]);
   }
   active(agent: string) {
-    return !!this.store.db
-      .query("SELECT 1 FROM tokens WHERE agent=?")
-      .get(agent);
+    return !this.store.owner.closed && this.store.tokens.has(agent);
   }
   bindings(agent: string) {
     need(this.active(agent));
@@ -107,21 +109,16 @@ export class Service {
   visible(agent: string, m: MessageV1) {
     return this.bindings(agent).some((b) => this.admitted(b, m));
   }
-  message(id: string): MessageV1 | null {
-    const row = this.store.db
-      .query("SELECT body FROM messages WHERE id=?")
-      .get(id) as any;
+  async message(id: string): Promise<MessageV1 | null> {
+    const row = (await this.store.db.get("post_messages", { id }))[0];
     return row ? JSON.parse(row.body) : null;
   }
-  assetMessages(agent: string, id: string) {
+  async assetMessages(agent: string, id: string) {
+    const links = await this.store.db.get("post_message_assets", { asset: id });
     const result: MessageV1[] = [];
-    for (const row of this.store.db
-      .query(
-        "SELECT m.body FROM message_assets a JOIN messages m ON m.id=a.message WHERE a.asset=?",
-      )
-      .iterate(id) as Iterable<{ body: string }>) {
-      const m = JSON.parse(row.body);
-      if (this.visible(agent, m)) {
+    for (const link of links) {
+      const m = await this.message(link.message);
+      if (m && this.visible(agent, m)) {
         result.push(m);
         if (result.length === 100) break;
       }
@@ -129,10 +126,10 @@ export class Service {
     return result;
   }
   async authorizeAsset(agent: string, id: string, signal: AbortSignal) {
-    const row = this.assets.row(id);
+    const row = await this.assets.row(id);
     need(row);
     if (row.owner === agent) return this.assets.metadata(id);
-    for (const m of this.assetMessages(agent, id)) {
+    for (const m of await this.assetMessages(agent, id)) {
       try {
         await this.check(agent, m.account_id, m.conversation.id, signal);
         return this.assets.metadata(id);
@@ -177,7 +174,7 @@ export class Service {
       return "alias_matched";
     return null;
   }
-  observe(
+  async observe(
     account: string,
     o: Observation,
     direction: "inbound" | "outbound" = "inbound",
@@ -187,44 +184,38 @@ export class Service {
     const a = this.config.accounts.find((a) => a.id === account)!;
     if (o.sender === a.native_id && direction === "inbound") return null;
     try {
-      return this.store.db.transaction(() => {
-        let conv = this.store.db
-          .query(
-            "SELECT * FROM conversations WHERE account=? AND native=? AND type=?",
-          )
-          .get(account, o.conversation_native_id, o.conversation_type) as any;
-        if (!conv) {
-          this.store.db.run(
-            "INSERT INTO conversations(id,account,native,type) VALUES (?,?,?,?)",
-            [
-              opaque("cnv"),
-              account,
-              o.conversation_native_id,
-              o.conversation_type,
-            ],
-          );
-          conv = this.store.db
-            .query(
-              "SELECT * FROM conversations WHERE account=? AND native=? AND type=?",
-            )
-            .get(account, o.conversation_native_id, o.conversation_type);
-        }
+      return (await this.store.db.transact(async (db) => {
+        const conversationQuery = {
+          account,
+          native: o.conversation_native_id,
+          type: o.conversation_type,
+        };
+        let conv = (await db.get("post_conversations", conversationQuery))[0];
+        if (!conv)
+          conv = await db.create("post_conversations", {
+            id: opaque("cnv"),
+            ...conversationQuery,
+          });
         const native = o.mutation
           ? o.native_id + ":" + o.mutation
           : o.native_id;
-        const duplicate = this.store.db
-          .query(
-            "SELECT id FROM messages WHERE account=? AND conversation=? AND native=?",
-          )
-          .get(account, conv.id, native) as any;
-        if (duplicate) return this.message(duplicate.id);
+        const duplicate = (
+          await db.get("post_messages", {
+            account,
+            conversation: conv.id,
+            native,
+          })
+        )[0];
+        if (duplicate) return JSON.parse(duplicate.body) as MessageV1;
         const id = opaque("msg");
         const replied = o.reply_native_id
-          ? (this.store.db
-              .query(
-                "SELECT body FROM messages WHERE account=? AND conversation=? AND native=?",
-              )
-              .get(account, conv.id, o.reply_native_id) as any)
+          ? (
+              await db.get("post_messages", {
+                account,
+                conversation: conv.id,
+                native: o.reply_native_id,
+              })
+            )[0]
           : null;
         const reply = replied ? (JSON.parse(replied.body) as MessageV1) : null;
         const m: MessageV1 = {
@@ -254,39 +245,34 @@ export class Service {
           direction,
           mutation: o.mutation ?? null,
         };
-        this.store.db.run(
-          "INSERT INTO messages(id,account,conversation,native,sender,body) VALUES (?,?,?,?,?,?)",
-          [id, account, conv.id, native, o.sender, ""],
-        );
-        m.sequence = Number(
-          (
-            this.store.db
-              .query("SELECT seq FROM messages WHERE id=?")
-              .get(id) as any
-          ).seq,
-        );
+
+        const row = await db.create("post_messages", {
+          id,
+          account,
+          conversation: conv.id,
+          native,
+          sender: o.sender,
+          body: "",
+        });
+        m.sequence = row.seq;
         Message.parse(m);
         need(Buffer.byteLength(JSON.stringify(m)) <= 65536, "capacity");
-        this.store.db.run("UPDATE messages SET body=? WHERE id=?", [
-          JSON.stringify(m),
-          id,
-        ]);
+        await db.set("post_messages", { id }, { body: JSON.stringify(m) });
         for (const asset of o.assets)
-          this.store.db.run(
-            "INSERT OR IGNORE INTO message_assets VALUES (?,?)",
-            [asset.asset_id, id],
-          );
+          await db.upsert("post_message_assets", [
+            { asset: asset.asset_id, message: id },
+          ]);
         if (!o.catchup)
           for (const b of this.config.bindings) {
             if (!this.active(b.agent_id) || !this.admitted(b, m)) continue;
             const reason = this.wake(b, m);
             if (!reason) continue;
-            const count = this.store.db
-              .query(
-                "SELECT count(*) n FROM deliveries WHERE binding=? AND state IN ('pending','held')",
-              )
-              .get(b.id) as any;
-            need(count.n < this.config.backlog_limit, "capacity");
+            const count = await db.eval(
+              "post_deliveries",
+              (row) => $.count(row.id),
+              { binding: b.id, state: ["pending", "held"] },
+            );
+            need(count < this.config.backlog_limit, "capacity");
             const event = PostEventV1.parse({
               schema_version: 1,
               type: "message",
@@ -295,24 +281,21 @@ export class Service {
               message: m,
               wake: { reason },
             });
-            this.store.db.run(
-              "INSERT INTO deliveries(id,binding,agent,message,receiver,body) VALUES (?,?,?,?,?,?)",
-              [
-                event.delivery_id,
-                b.id,
-                b.agent_id,
-                id,
-                b.receiver_url,
-                JSON.stringify(event),
-              ],
-            );
+            await db.create("post_deliveries", {
+              id: event.delivery_id,
+              binding: b.id,
+              agent: b.agent_id,
+              message: id,
+              receiver: b.receiver_url,
+              body: JSON.stringify(event),
+            });
           }
         return m;
-      })();
+      })) as MessageV1;
     } catch (e) {
       this.errors.set(account, e instanceof Fault ? e.code : "storage");
       try {
-        this.store.gap(account, "capture_stopped");
+        await this.store.gap(account, "capture_stopped");
       } catch {}
       throw e;
     }
@@ -388,11 +371,11 @@ export class Service {
       need(scopes.length);
       const query = name + ":" + args.account_id;
       const offset = this.offset(agent, query, args.before);
-      const rows = this.store.db
-        .query(
-          "SELECT * FROM conversations WHERE account=? AND seq<? ORDER BY seq DESC LIMIT 101",
-        )
-        .all(args.account_id, offset) as any[];
+      const rows = await this.store.db.get(
+        "post_conversations",
+        { account: args.account_id, seq: { $lt: offset } },
+        { sort: { seq: "desc" }, limit: 101 },
+      );
       const items = [];
       let last = 0;
       for (const r of rows) {
@@ -422,9 +405,12 @@ export class Service {
       args.conversation_id,
       signal,
     );
-    const conv = this.store.db
-      .query("SELECT * FROM conversations WHERE id=? AND account=?")
-      .get(scope.conversation_id, scope.account_id);
+    const conv = (
+      await this.store.db.get("post_conversations", {
+        id: scope.conversation_id,
+        account: scope.account_id,
+      })
+    )[0];
     need(conv);
     if (name === "get_conversation") return this.conversation(conv);
     const query = name + ":" + args.account_id + ":" + args.conversation_id,
@@ -445,11 +431,15 @@ export class Service {
             : null,
       };
     }
-    const rows = this.store.db
-      .query(
-        "SELECT seq,body FROM messages WHERE account=? AND conversation=? AND seq<? ORDER BY seq DESC LIMIT 101",
-      )
-      .all(scope.account_id, scope.conversation_id, offset) as any[];
+    const rows = await this.store.db.get(
+      "post_messages",
+      {
+        account: scope.account_id,
+        conversation: scope.conversation_id,
+        seq: { $lt: offset },
+      },
+      { sort: { seq: "desc" }, limit: 101 },
+    );
     const items: MessageV1[] = [];
     let last = 0,
       budget = 0;
@@ -500,9 +490,9 @@ export class Service {
   async send(agent: string, args: any, signal: AbortSignal): Promise<Send> {
     const scope = this.scope(agent, args.account_id, args.conversation_id);
     const serialized = JSON.stringify(args);
-    const old = this.store.db
-      .query("SELECT * FROM sends WHERE agent=? AND request=?")
-      .get(agent, args.request_id) as any;
+    const old = (
+      await this.store.db.get("post_sends", { agent, request: args.request_id })
+    )[0];
     if (old) {
       need(old.input === serialized, "conflict");
       return old.result
@@ -516,7 +506,7 @@ export class Service {
     }
     await this.check(agent, args.account_id, args.conversation_id, signal);
     const reply = args.reply_to_message_id
-      ? this.message(args.reply_to_message_id)
+      ? await this.message(args.reply_to_message_id)
       : null;
     if (args.reply_to_message_id)
       need(
@@ -548,18 +538,20 @@ export class Service {
         need(scope.type === "group", "invalid_request");
     }
     signal.throwIfAborted();
-    // Another request may have committed the same ledger key during preflight I/O.
-    if (
-      this.store.db
-        .query("SELECT 1 FROM sends WHERE agent=? AND request=?")
-        .get(agent, args.request_id)
-    )
-      return this.send(agent, args, signal);
-    this.store.db.run("INSERT INTO sends VALUES (?,?,?,NULL)", [
-      agent,
-      args.request_id,
-      serialized,
-    ]);
+    const existing = await this.store.db.transact(async (db) => {
+      const row = (
+        await db.get("post_sends", { agent, request: args.request_id })
+      )[0];
+      if (row) return row;
+      await db.create("post_sends", {
+        agent,
+        request: args.request_id,
+        input: serialized,
+        result: null,
+      });
+      return null;
+    });
+    if (existing) return this.send(agent, args, signal);
     const parts: Send["parts"] = [];
     let halted = false;
     let replySequence = 0;
@@ -568,24 +560,20 @@ export class Service {
       this.config.accounts.find((a) => a.id === scope.account_id)?.platform ===
         "qq"
     ) {
-      replySequence = this.store.db.transaction(() => {
-        const row = this.store.db
-          .query(
-            "SELECT sequence FROM reply_sequences WHERE account=? AND native=?",
-          )
-          .get(scope.account_id, reply.native_message_id) as any;
+      replySequence = await this.store.db.transact(async (db) => {
+        const query = {
+          account: scope.account_id,
+          native: reply.native_message_id,
+        };
+        const row = (await db.get("post_reply_sequences", query))[0];
         const start = row?.sequence ?? 0;
-        this.store.db.run(
-          "INSERT OR REPLACE INTO reply_sequences VALUES (?,?,?)",
-          [
-            scope.account_id,
-            reply.native_message_id,
-            start + args.content.length,
-          ],
-        );
+        await db.upsert("post_reply_sequences", [
+          { ...query, sequence: start + args.content.length },
+        ]);
         return start;
-      })();
+      });
     }
+
     for (const [index, part] of (args.content as ContentV1[]).entries()) {
       if (halted) {
         parts.push({
@@ -638,7 +626,7 @@ export class Service {
       let stored = true;
       try {
         for (const native of ids)
-          this.observe(
+          await this.observe(
             scope.account_id,
             {
               native_id: native,
@@ -648,7 +636,9 @@ export class Service {
               timestamp: Date.now(),
               content: [part],
               assets:
-                "asset_id" in part ? [this.assets.metadata(part.asset_id)] : [],
+                "asset_id" in part
+                  ? [await this.assets.metadata(part.asset_id)]
+                  : [],
               mentions: part.type === "mention" ? [part.native_user_id] : [],
               self_mentioned: false,
               catchup: true,
@@ -663,18 +653,17 @@ export class Service {
       if (!stored) halted = true;
       // Save confirmed receipts before proceeding to another native part.
       try {
-        this.store.db.run(
-          "UPDATE sends SET result=? WHERE agent=? AND request=?",
-          [
-            JSON.stringify({
+        await this.store.db.set(
+          "post_sends",
+          { agent, request: args.request_id },
+          {
+            result: JSON.stringify({
               request_id: args.request_id,
               status: "unknown",
               parts,
               stored: false,
             }),
-            agent,
-            args.request_id,
-          ],
+          },
         );
       } catch {
         halted = true;
@@ -695,38 +684,37 @@ export class Service {
       stored: parts.every((p) => p.stored),
     };
     try {
-      this.store.db.run(
-        "UPDATE sends SET result=? WHERE agent=? AND request=?",
-        [JSON.stringify(result), agent, args.request_id],
+      await this.store.db.set(
+        "post_sends",
+        { agent, request: args.request_id },
+        { result: JSON.stringify(result) },
       );
     } catch {}
     return result;
   }
   async dispatch(binding: Binding) {
-    const row = this.store.db
-      .query(
-        "SELECT * FROM deliveries WHERE binding=? AND state IN ('pending','held') ORDER BY seq LIMIT 1",
+    const row = (
+      await this.store.db.get(
+        "post_deliveries",
+        { binding: binding.id, state: ["pending", "held"] },
+        { sort: { seq: "asc" }, limit: 1 },
       )
-      .get(binding.id) as any;
+    )[0];
     if (!row || row.due > Date.now()) return;
-    const m = this.message(row.message);
+    const m = await this.message(row.message);
+    const update = (value: any) =>
+      this.store.db.set("post_deliveries", { id: row.id }, value);
     if (
       row.agent !== binding.agent_id ||
       !this.active(binding.agent_id) ||
       !m ||
       !this.admitted(binding, m)
     ) {
-      this.store.db.run(
-        "UPDATE deliveries SET state='cancelled',category='scope_revoked' WHERE id=?",
-        [row.id],
-      );
+      await update({ state: "cancelled", category: "scope_revoked" });
       return;
     }
     if (row.receiver !== binding.receiver_url) {
-      this.store.db.run(
-        "UPDATE deliveries SET state='held',category='receiver_changed' WHERE id=?",
-        [row.id],
-      );
+      await update({ state: "held", category: "receiver_changed" });
       return;
     }
     try {
@@ -736,7 +724,7 @@ export class Service {
         m.conversation.id,
         this.signal(),
       );
-      const secret = this.store.secret(
+      const secret = await this.store.secret(
         binding.receiver_credential,
         binding.id,
         "receiver",
@@ -753,29 +741,33 @@ export class Service {
       });
       await response.body?.cancel();
       if (!response.ok) throw new Error();
-      this.store.db.run(
-        "UPDATE deliveries SET state='accepted',category=NULL WHERE id=?",
-        [row.id],
-      );
+      await update({ state: "accepted", category: null });
     } catch (e) {
       if (e instanceof Fault && e.code === "not_found") {
-        this.store.db.run(
-          "UPDATE deliveries SET state='cancelled',category='scope_revoked' WHERE id=?",
-          [row.id],
-        );
+        await update({ state: "cancelled", category: "scope_revoked" });
         return;
       }
       if (!this.closed)
-        this.store.db.run(
-          "UPDATE deliveries SET state='pending',attempt=attempt+1,due=?,category='receiver_unavailable' WHERE id=?",
-          [
+        await update({
+          state: "pending",
+          attempt: row.attempt + 1,
+          due:
             Date.now() + Math.min(60000, 250 * 2 ** Math.min(row.attempt, 8)),
-            row.id,
-          ],
-        );
+          category: "receiver_unavailable",
+        });
     }
   }
-  startDispatch() {
+  async startDispatch() {
+    for (const row of await this.store.db.get("post_deliveries", {
+      state: ["pending", "held"],
+    }))
+      if (!this.config.bindings.some((b) => b.id === row.binding))
+        await this.store.db.set(
+          "post_deliveries",
+          { id: row.id },
+          { state: "cancelled", category: "binding_removed" },
+        );
+
     for (const b of this.config.bindings)
       this.track(
         (async () => {
@@ -797,30 +789,29 @@ export class Service {
           }
         })(),
       );
-    // Removed binding IDs must never resume via a future accidental ID reuse.
-    for (const row of this.store.db
-      .query(
-        "SELECT id,binding FROM deliveries WHERE state IN ('pending','held')",
-      )
-      .all() as any[])
-      if (!this.config.bindings.some((b) => b.id === row.binding))
-        this.store.db.run(
-          "UPDATE deliveries SET state='cancelled',category='binding_removed' WHERE id=?",
-          [row.id],
-        );
   }
-  status() {
-    const blocked = this.store.db
-      .query("SELECT 1 FROM deliveries WHERE state='held' LIMIT 1")
-      .get();
-    const full = this.store.db
-      .query(
-        "SELECT binding FROM deliveries WHERE state IN ('pending','held') GROUP BY binding HAVING count(*)>=? LIMIT 1",
+  async status() {
+    const backlog = [];
+    for (const state of ["pending", "held", "accepted", "cancelled"]) {
+      const count = await this.store.db.eval(
+        "post_deliveries",
+        (r) => $.count(r.id),
+        { state },
+      );
+      if (count) backlog.push({ state, count });
+    }
+    let full = false;
+    for (const b of this.config.bindings)
+      if (
+        (await this.store.db.eval("post_deliveries", (r) => $.count(r.id), {
+          binding: b.id,
+          state: ["pending", "held"],
+        })) >= this.config.backlog_limit
       )
-      .get(this.config.backlog_limit);
+        full = true;
     return {
       healthy:
-        !blocked &&
+        !backlog.some((r) => r.state === "held") &&
         !full &&
         !this.closed &&
         this.errors.size === 0 &&
@@ -830,9 +821,7 @@ export class Service {
         ready: p.ready,
         error: this.errors.get(id) ?? null,
       })),
-      backlog: this.store.db
-        .query("SELECT state,count(*) count FROM deliveries GROUP BY state")
-        .all(),
+      backlog,
       errors: [...this.errors].map(([scope, category]) => ({
         scope,
         category,

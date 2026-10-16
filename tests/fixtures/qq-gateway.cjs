@@ -1,4 +1,4 @@
-// Test-owned transport process: use published ws server under Node, avoiding Bun's server shim.
+// Test-owned Node transport process using the published ws server.
 const { WebSocketServer } = require("ws");
 const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
 let socket,

@@ -1,11 +1,13 @@
-import { test, expect } from "bun:test";
+import { count } from "./fixtures/state";
+import { test, expect } from "vitest";
+import type { PostDatabase } from "../src/models";
 import { start } from "../src/runtime";
 import { platformsFixture } from "./fixtures/platforms";
 import { stateFixture, until } from "./fixtures/state";
 import { consumerFixture } from "./fixtures/consumer";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-test("real Bun Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", async () => {
+test("real Node Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", async () => {
   const p = await platformsFixture(),
     receiver = await consumerFixture(true),
     state = await stateFixture(p.url, receiver.url);
@@ -13,6 +15,11 @@ test("real Bun Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", a
   let client: Client | undefined;
   try {
     r = await start(state.config, { qqOrigin: p.url, qqGateway: p.gateway });
+    expect(
+      await (r.context.database as unknown as PostDatabase).get("post_tokens", {
+        agent: "cfl",
+      }),
+    ).toHaveLength(1);
     client = new Client({ name: "acceptance", version: "1" });
     await client.connect(
       new StreamableHTTPClientTransport(new URL(r.http.url + "/mcp"), {
@@ -36,15 +43,13 @@ test("real Bun Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", a
     p.sendQQ("GROUP_AT_MESSAGE_CREATE", "wake");
     p.sendQQ("C2C_MESSAGE_CREATE", "direct");
     await until(
-      () =>
-        (r!.store.db.query("SELECT count(*) n FROM messages").get() as any)
-          ?.n === 3,
+      async () =>
+        (({ n: await count(r!.store.db, "messages") }) as any)?.n === 3,
     );
     p.sendMatrix({ body: "Post, hello", msgtype: "m.text" });
     await until(
-      () =>
-        (r!.store.db.query("SELECT count(*) n FROM messages").get() as any)
-          ?.n === 4,
+      async () =>
+        (({ n: await count(r!.store.db, "messages") }) as any)?.n === 4,
     );
     const history = await client.callTool({
       name: "read_messages",
@@ -52,9 +57,9 @@ test("real Bun Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", a
     });
     expect((history.structuredContent as any).items.length).toBe(2);
     await until(
-      () =>
-        (receiver.db.query("SELECT count(*) n FROM inbox").get() as any)?.n ===
-        3,
+      async () =>
+        (receiver.db.prepare("SELECT count(*) n FROM inbox").get() as any)
+          ?.n === 3,
       5000,
     );
     expect(receiver.attempts[0]).toBe(receiver.attempts[1]);
@@ -90,16 +95,24 @@ test("real Bun Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", a
       mentions: [{ scope: "single", is_you: true, id: nativeMention }],
     });
     await until(
-      () =>
-        !!r!.store.db
-          .query("SELECT body FROM messages WHERE native=?")
-          .get("native-self-mention"),
+      async () =>
+        !!(
+          await r!.store.db.get(
+            "post_messages",
+            { native: "native-self-mention" },
+            { fields: ["body"] },
+          )
+        )[0],
     );
     const observed = JSON.parse(
       (
-        r.store.db
-          .query("SELECT body FROM messages WHERE native=?")
-          .get("native-self-mention") as any
+        (
+          await r.store.db.get(
+            "post_messages",
+            { native: "native-self-mention" },
+            { fields: ["body"] },
+          )
+        )[0] as any
       ).body,
     );
     expect(observed.content).toEqual([
@@ -110,15 +123,23 @@ test("real Bun Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", a
       native_user_ids: [nativeMention],
     });
     expect(
-      r.store.db
-        .query("SELECT body FROM messages WHERE native=?")
-        .get("native-self-echo"),
-    ).toBeNull();
+      (
+        await r.store.db.get(
+          "post_messages",
+          { native: "native-self-echo" },
+          { fields: ["body"] },
+        )
+      )[0],
+    ).toBeUndefined();
     const outbound = JSON.parse(
       (
-        r.store.db
-          .query("SELECT body FROM messages WHERE native=?")
-          .get("qq-sent-1") as any
+        (
+          await r.store.db.get(
+            "post_messages",
+            { native: "qq-sent-1" },
+            { fields: ["body"] },
+          )
+        )[0] as any
       ).body,
     );
     expect(outbound.sender.native_id).toBe("qq-user");
@@ -126,7 +147,7 @@ test("real Bun Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", a
     console.error(
       "runtime evidence",
       p.calls.map((c) => c.path),
-      r?.service.status(),
+      await r?.service.status(),
     );
     throw e;
   } finally {
@@ -137,3 +158,48 @@ test("real Bun Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", a
     await state.close();
   }
 }, 15000);
+
+test("framework disposal during startup cancels native I/O before owner release", async () => {
+  const { Context } = await import("@koishijs/core");
+  const { postPlugin } = await import("../src/runtime");
+  const { Store } = await import("../src/store");
+  const { access } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const p = await platformsFixture(),
+    state = await stateFixture(p.url, "http://127.0.0.1:1", 3000);
+  const ctx = new Context();
+  let failed = false;
+  try {
+    p.tokenStall(true);
+    const fork = ctx.plugin(
+      postPlugin({
+        connect: true,
+        fixture: { qqOrigin: p.url, qqGateway: p.gateway },
+        failed: () => {
+          failed = true;
+        },
+      }),
+      state.config,
+    );
+    const starting = ctx.start();
+    await until(() => p.calls.some((c) => c.path === "/app/getAppAccessToken"));
+    fork.dispose();
+    await until(() => failed && p.aborts > 0);
+    await starting;
+    await until(async () => {
+      try {
+        await access(join(state.config.data_dir, "owner.lock"));
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    const reopened = await Store.open(state.config);
+    await reopened.close();
+    expect(p.sendCount).toBe(0);
+  } finally {
+    await ctx.stop();
+    await p.close();
+    await state.close();
+  }
+});

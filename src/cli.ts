@@ -1,17 +1,19 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
+import { resolve, dirname } from "node:path";
+import { fileTypeFromBuffer } from "file-type";
 import { loadConfig, privateFile } from "./config";
+import { $ } from "minato";
 import { Store } from "./store";
-import { start } from "./runtime";
-const help = `Lamplit Post v1 (Bun)
+const help = `Lamplit Post v1 (Node 24)
 post <command> --config FILE
-  config-check      Validate strict TOML without creating state
+  config-check      Validate one Koishi YAML Post entry without creating state
   credential-put --ref REF --account ID --kind platform|receiver
                     Read secret from stdin; store authenticated ciphertext offline
-  token-issue --agent ID    Print one new token, replacing previous token
-  token-revoke --agent ID   Revoke token offline
+  token-issue --agent ID    Print one new machine-agent token, replacing previous token
+  token-revoke --agent ID   Revoke machine-agent token offline
   status            Inspect safe offline state; refuses serving lock
-  serve             Run until SIGINT/SIGTERM
+  serve             Use the Koishi CLI supervisor until process-group SIGINT/SIGTERM
 post asset-upload --url BASE --file FILE
   POST_TOKEN_FILE (private) or POST_TOKEN supplies auth, never argv
 All mutation/status commands refuse a serving data-directory owner.
@@ -19,22 +21,34 @@ All mutation/status commands refuse a serving data-directory owner.
 export async function main(argv = process.argv.slice(2)) {
   const command = argv[0];
   if (!command || command === "--help" || command === "help") {
+    if (argv.length > 1) throw new Error("Invalid arguments");
     process.stdout.write(help);
     return;
   }
   const { values: v } = parseArgs({
     args: argv.slice(1),
-    options: {
-      config: { type: "string" },
-      ref: { type: "string" },
-      account: { type: "string" },
-      kind: { type: "string" },
-      agent: { type: "string" },
-      url: { type: "string" },
-      file: { type: "string" },
-    },
+    options: Object.fromEntries(
+      ["config", "ref", "account", "kind", "agent", "url", "file"].map((k) => [
+        k,
+        { type: "string" as const },
+      ]),
+    ),
     strict: true,
   });
+  const allowed: Record<string, string[]> = {
+    "config-check": ["config"],
+    serve: ["config"],
+    status: ["config"],
+    "credential-put": ["config", "ref", "account", "kind"],
+    "token-issue": ["config", "agent"],
+    "token-revoke": ["config", "agent"],
+    "asset-upload": ["url", "file"],
+  };
+  if (
+    !allowed[command] ||
+    Object.keys(v).some((key) => !allowed[command].includes(key))
+  )
+    throw new Error("Invalid arguments");
   if (command === "asset-upload") {
     if (!v.url || !v.file) throw new Error("Upload URL/file required");
     const base = new URL(v.url);
@@ -52,120 +66,99 @@ export async function main(argv = process.argv.slice(2)) {
       token = (await readFile(process.env.POST_TOKEN_FILE, "utf8")).trim();
     }
     if (!token) throw new Error("Token required");
-    const file = Bun.file(v.file);
-    const endpoint = new URL("/assets", base);
-    const response = await fetch(endpoint, {
+    const bytes = await readFile(v.file),
+      detected = await fileTypeFromBuffer(bytes).catch(() => undefined);
+    const response = await fetch(new URL("/assets", base), {
       method: "POST",
       headers: {
         Authorization: "Bearer " + token,
-        "Content-Type": file.type || "application/octet-stream",
+        "Content-Type": detected?.mime ?? "application/octet-stream",
         "X-Post-Filename": v.file.split("/").pop()!,
       },
-      body: file,
+      body: bytes,
       signal: AbortSignal.timeout(30000),
       redirect: "error",
     });
     if (response.status !== 201) throw new Error("Upload rejected");
-    process.stdout.write(JSON.stringify(await response.json()) + "\n");
+    console.log(JSON.stringify(await response.json()));
     return;
   }
+  if (!v.config) throw new Error("Config required");
+  if (command.startsWith("token-") && !v.agent)
+    throw new Error("Agent required");
   if (
-    ![
-      "config-check",
-      "credential-put",
-      "token-issue",
-      "token-revoke",
-      "status",
-      "serve",
-    ].includes(command) ||
-    !v.config
+    command === "credential-put" &&
+    (!v.ref || !v.account || !["platform", "receiver"].includes(v.kind ?? ""))
   )
-    throw new Error("Command/config required");
+    throw new Error("Credential fields required");
   const config = await loadConfig(v.config);
+  if (v.agent && !config.bindings.some((b) => b.agent_id === v.agent))
+    throw new Error("Agent not configured");
   if (command === "config-check") {
     console.log(JSON.stringify({ valid: true }));
     return;
   }
   if (command === "serve") {
-    const runtime = await start(config);
-    console.log(
-      JSON.stringify({
-        ready: true,
-        url: runtime.http.url,
-        status: runtime.service.status(),
-      }),
-    );
-    const statusTimer = setInterval(
-      () => console.log(JSON.stringify({ status: runtime.service.status() })),
-      30000,
-    );
-    statusTimer.unref();
-    await new Promise<void>((resolve) => {
-      const stop = () => resolve();
-      process.once("SIGTERM", stop);
-      process.once("SIGINT", stop);
-    });
-    clearInterval(statusTimer);
-    await runtime.stop();
+    const configPath = resolve(v.config);
+    process.chdir(resolve(dirname(process.argv[1]), ".."));
+    process.umask(0o077);
+    process.argv = [process.execPath, "koishi", "start", configPath];
+    await import("koishi/lib/cli");
     return;
   }
-  const store = new Store(config);
+  let secret = "";
+  if (command === "credential-put") {
+    const matched =
+      v.kind === "platform"
+        ? config.accounts.some(
+            (a) => a.id === v.account && a.credential === v.ref,
+          )
+        : config.bindings.some(
+            (b) => b.id === v.account && b.receiver_credential === v.ref,
+          );
+    if (!matched || process.stdin.isTTY)
+      throw new Error(
+        "Credential reference is not configured or stdin unavailable",
+      );
+    for await (const chunk of process.stdin) {
+      secret += chunk.toString();
+      if (secret.length > 16384) throw new Error("Invalid secret");
+    }
+    secret = secret.trim();
+    if (!secret) throw new Error("Invalid secret");
+  }
+  const store = await Store.open(config);
   try {
     if (command === "credential-put") {
-      if (
-        !v.ref ||
-        !v.account ||
-        !["platform", "receiver"].includes(v.kind ?? "")
-      )
-        throw new Error("Credential fields required");
-      const matched =
-        v.kind === "platform"
-          ? config.accounts.some(
-              (a) => a.id === v.account && a.credential === v.ref,
-            )
-          : config.bindings.some(
-              (b) => b.id === v.account && b.receiver_credential === v.ref,
-            );
-      if (!matched) throw new Error("Credential reference is not configured");
-      if (process.stdin.isTTY) throw new Error("Use a private stdin pipe");
-      const text = await new Response(Bun.stdin.stream()).text();
-      if (!text.trim() || text.length > 16384)
-        throw new Error("Invalid secret");
-      store.putSecret(v.ref, v.account, v.kind!, text.trim());
+      await store.putSecret(v.ref!, v.account!, v.kind!, secret);
       console.log(JSON.stringify({ saved: true }));
-    } else if (command === "token-issue") {
-      if (!v.agent) throw new Error("Agent required");
-      console.log(store.issue(v.agent));
-    } else if (command === "token-revoke") {
-      if (!v.agent) throw new Error("Agent required");
-      store.revoke(v.agent);
+    } else if (command === "token-issue")
+      console.log(await store.issue(v.agent!));
+    else if (command === "token-revoke") {
+      await store.revoke(v.agent!);
       console.log(JSON.stringify({ revoked: true }));
     } else
       console.log(
         JSON.stringify({
-          accounts: store.db
-            .query("SELECT account,platform FROM identities")
-            .all(),
-          deliveries: store.db
-            .query("SELECT state,count(*) count FROM deliveries GROUP BY state")
-            .all(),
-          gaps: store.db
-            .query(
-              "SELECT account,category,at FROM gaps ORDER BY seq DESC LIMIT 20",
-            )
-            .all(),
+          accounts: await store.db.get("post_identities", {}),
+          deliveries: await Promise.all(
+            ["pending", "held", "accepted", "cancelled"].map(async (state) => ({
+              state,
+              count: await store.db.eval(
+                "post_deliveries",
+                (r) => $.count(r.id),
+                { state },
+              ),
+            })),
+          ),
+          gaps: await store.db.get(
+            "post_gaps",
+            {},
+            { sort: { seq: "desc" }, limit: 20 },
+          ),
         }),
       );
   } finally {
-    store.close();
+    await store.close();
   }
 }
-if (import.meta.main)
-  main()
-    .then(() => process.exit(0))
-    .catch(() => {
-      console.error(
-        "Post command failed: invalid input, unavailable state or locked owner. See operator guide.",
-      );
-      process.exit(1);
-    });

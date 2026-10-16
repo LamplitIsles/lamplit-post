@@ -3,31 +3,53 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun test",
+    "test": "pnpm run package && node scripts/test.mjs",
     "typecheck": "tsc --noEmit",
-    "build": "bun build src/cli.ts --target=bun --outdir=dist",
-    "package": "bun scripts/package.ts",
+    "build": "node scripts/build.mjs",
+    "package": "node scripts/package.mjs",
     "format": "prettier --write src tests scripts"
   },
   "dependencies": {
     "@cordisjs/plugin-http": "0.6.3",
-    "@iarna/toml": "^2.2.5",
+    "@koishi-ce/plugin-database-sqlite": "1.2.2",
     "@koishijs/core": "4.18.11",
+    "@koishijs/loader": "4.6.11",
     "@koishijs/plugin-adapter-qq": "4.14.0",
+    "@koishijs/plugin-http": "0.6.3",
+    "@koishijs/plugin-proxy-agent": "0.3.3",
+    "@minatojs/sql-utils": "5.6.0",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@satorijs/adapter-qq": "4.14.0",
     "@satorijs/core": "4.6.0",
+    "cosmokit": "1.8.1",
     "file-type": "^22.2.0",
     "koishi": "4.18.11",
     "matrix-js-sdk": "^44.0.0",
+    "minato": "3.7.0",
     "ws": "^8.22.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.3",
     "@types/node": "^26.6.5",
     "@types/ws": "^8.18.2",
+    "esbuild": "0.28.2",
     "prettier": "^3.9.10",
-    "typescript": "^7.0.2"
-  }
+    "typescript": "^7.0.2",
+    "vitest": "5.0.4",
+    "yaml": "2.9.1"
+  },
+  "packageManager": "pnpm@12.11.2",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "files": [
+    "dist/cli.cjs",
+    "dist/post-plugin.cjs",
+    "docs",
+    "deploy",
+    "examples/koishi.yml",
+    "LICENSE",
+    "patches",
+    "pnpm-workspace.yaml"
+  ]
 }

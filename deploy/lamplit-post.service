@@ -7,18 +7,19 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=REPLACE_WITH_SERVICE_USER
-ExecStart=/opt/lamplit-post/bun /opt/lamplit-post/cli.js serve --config /etc/lamplit-post/post.toml
+ExecStart=/opt/node24/bin/node /opt/lamplit-post/dist/cli.cjs serve --config /etc/lamplit-post/koishi.yml
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=150s
 TimeoutStopSec=40s
 KillSignal=SIGTERM
+KillMode=control-group
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/lamplit-post /etc/lamplit-post/keys
+ReadWritePaths=/var/lib/lamplit-post /etc/lamplit-post
 
 [Install]
 WantedBy=multi-user.target

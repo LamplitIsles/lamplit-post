@@ -10,16 +10,11 @@ export class Assets {
     need(/^ast_[A-Za-z0-9_-]+$/.test(storage), "invalid_request");
     return join(this.store.config.data_dir, "assets", storage);
   }
-  row(id: string) {
-    return this.store.db.query("SELECT * FROM assets WHERE id=?").get(id) as {
-      id: string;
-      owner: string | null;
-      metadata: string;
-      storage: string | null;
-    } | null;
+  async row(id: string) {
+    return (await this.store.db.get("post_assets", { id }))[0] ?? null;
   }
-  metadata(id: string): AssetV1 {
-    const r = this.row(id);
+  async metadata(id: string): Promise<AssetV1> {
+    const r = await this.row(id);
     need(r);
     return JSON.parse(r.metadata);
   }
@@ -99,12 +94,12 @@ export class Assets {
         download_path: "/assets/" + id,
       };
       try {
-        this.store.db.run("INSERT INTO assets VALUES (?,?,?,?)", [
+        await this.store.db.create("post_assets", {
           id,
           owner,
-          JSON.stringify(meta),
-          id,
-        ]);
+          metadata: JSON.stringify(meta),
+          storage: id,
+        });
       } catch (e) {
         await unlink(this.path(id));
         throw e;
@@ -119,7 +114,7 @@ export class Assets {
       await reader.cancel().catch(() => {});
     }
   }
-  unavailable(mime: string, name: string, reason: string) {
+  async unavailable(mime: string, name: string, reason: string) {
     const id = opaque("ast");
     const meta: AssetV1 = {
       asset_id: id,
@@ -130,16 +125,16 @@ export class Assets {
       download_path: null,
       reason,
     };
-    this.store.db.run("INSERT INTO assets VALUES (?,?,?,?)", [
+    await this.store.db.create("post_assets", {
       id,
-      null,
-      JSON.stringify(meta),
-      null,
-    ]);
+      owner: null,
+      metadata: JSON.stringify(meta),
+      storage: null,
+    });
     return meta;
   }
   async bytes(id: string, signal?: AbortSignal) {
-    const r = this.row(id);
+    const r = await this.row(id);
     need(r?.storage, "unavailable");
     return readFile(this.path(r.storage), { signal });
   }

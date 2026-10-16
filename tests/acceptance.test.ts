@@ -1,4 +1,5 @@
-import { test, expect } from "bun:test";
+import { count } from "./fixtures/state";
+import { test, expect, vi } from "vitest";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { start } from "../src/runtime";
@@ -12,8 +13,7 @@ import { consumerFixture } from "./fixtures/consumer";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ToolOutputs, PostEventV1 } from "../contracts/v1/index";
-const count = (db: any, table: string) =>
-  db.query(`SELECT count(*) n FROM ${table}`).get().n as number;
+
 async function fixture(timeout = 1500) {
   const p = await platformsFixture(),
     receiver = await consumerFixture(),
@@ -118,9 +118,9 @@ test("remote asset upload/download, both native file/image roundtrips, audio/vid
         info: { mimetype: mime },
         "m.mentions": { user_ids: ["@post:fixture"] },
       });
-    await until(() => count(f.receiver.db, "inbox") === 4);
+    await until(async () => (await count(f.receiver.db, "inbox")) === 4);
     const deliveries = f.receiver.db
-      .query("SELECT body FROM inbox")
+      .prepare("SELECT body FROM inbox")
       .all() as any[];
     for (const row of deliveries) {
       const event = PostEventV1.parse(JSON.parse(row.body));
@@ -147,23 +147,30 @@ test("all seven projections and raw assets enforce separate agent scope and priv
   const f = await fixture();
   try {
     const other = {
-      ...f.s.config.bindings[0]!,
+      ...f.r.service.config.bindings[0]!,
       id: "other-binding",
       agent_id: "other",
       scopes: [
-        { ...f.s.config.bindings[0]!.scopes[1]!, senders: ["someone-else"] },
+        {
+          ...f.r.service.config.bindings[0]!.scopes[1]!,
+          senders: ["someone-else"],
+        },
       ],
     };
-    f.s.config.bindings.push(other);
-    const otherToken = f.r.store.issue("other");
+    f.r.service.config.bindings.push(other);
+    const otherToken = await f.r.store.issue("other");
     f.p.sendQQ("C2C_MESSAGE_CREATE", "private", {
       id: "private-message",
       attachments: [{ url: f.p.url + "/attachment", content_type: "file" }],
     });
-    await until(() => count(f.r.store.db, "messages") === 1);
-    const msg = f.r.service.message(
-      (f.r.store.db.query("SELECT id FROM messages").get() as any).id,
-    )!;
+    await until(async () => (await count(f.r.store.db, "messages")) === 1);
+    const msg = (await f.r.service.message(
+      (
+        (
+          await f.r.store.db.get("post_messages", {}, { fields: ["id"] })
+        )[0] as any
+      ).id,
+    ))!;
     const asset = msg.assets[0]!;
     await expect(
       f.r.service.call("other", "read_messages", {
@@ -246,8 +253,8 @@ test("native addressing, verified reply/self suppression, mutations, cursors and
       id: "echo",
       author: { id: "qq-app" },
     });
-    await until(() => count(f.r.store.db, "messages") === 3);
-    await until(() => count(f.receiver.db, "inbox") === 2);
+    await until(async () => (await count(f.r.store.db, "messages")) === 3);
+    await until(async () => (await count(f.receiver.db, "inbox")) === 2);
     const receipt = await f.call("send_message", {
       ...qq,
       request_id: "reply-base",
@@ -264,10 +271,10 @@ test("native addressing, verified reply/self suppression, mutations, cursors and
       "m.relates_to": { rel_type: "m.replace", event_id: "$original" },
       "m.mentions": { user_ids: ["@post:fixture"] },
     });
-    await until(() => count(f.r.store.db, "messages") === 6);
-    await until(() => count(f.receiver.db, "inbox") === 3);
+    await until(async () => (await count(f.r.store.db, "messages")) === 6);
+    await until(async () => (await count(f.receiver.db, "inbox")) === 3);
     const reasons = (
-      f.receiver.db.query("SELECT body FROM inbox").all() as any[]
+      f.receiver.db.prepare("SELECT body FROM inbox").all() as any[]
     ).map((r) => JSON.parse(r.body).wake.reason);
     expect(new Set(reasons)).toEqual(
       new Set(["alias_matched", "mentioned", "replied_to_self"]),
@@ -277,7 +284,7 @@ test("native addressing, verified reply/self suppression, mutations, cursors and
       limit: 1,
     });
     expect(first.items.length).toBe(1);
-    expect(first.next_before).toBeString();
+    expect(first.next_before).toBeTypeOf("string");
     const second = await f.r.service.call("cfl", "read_messages", {
       ...qq,
       limit: 1,
@@ -354,7 +361,7 @@ test("durable request ledger preserves partial/unknown, rejects conflict, never 
     });
     expect(unknown.status).toBe("unknown");
     expect(Date.now() - start).toBeLessThan(1200);
-    await until(() => f.p.aborts > 0);
+    await until(async () => f.p.aborts > 0);
     f.p.drip(false);
     f.p.stall();
     const pending = f.r.service.track(
@@ -364,12 +371,12 @@ test("durable request ledger preserves partial/unknown, rejects conflict, never 
         content: [{ type: "text", text: "stall" }],
       }),
     );
-    await until(() => f.p.sendCount === 4);
+    await until(async () => f.p.sendCount === 4);
     const stopping = Date.now();
     await f.r.service.stop();
     expect((await pending).status).toBe("unknown");
     expect(Date.now() - stopping).toBeLessThan(1200);
-    await until(() => f.p.aborts > 1);
+    await until(async () => f.p.aborts > 1);
   } finally {
     await f.close();
   }
@@ -377,29 +384,33 @@ test("durable request ledger preserves partial/unknown, rejects conflict, never 
 test("vault ciphertext, wrong-key/tamper failures, exclusive owner, token rotation and identity pins", async () => {
   const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
   try {
-    let store = new Store(s.config);
-    expect(() => new Store(s.config)).toThrow();
-    expect(store.secret("qq-secret", "qq-main", "platform")).toBe(
+    let store = await Store.open(s.config);
+    await expect(Store.open(s.config)).rejects.toBeDefined();
+    expect(await store.secret("qq-secret", "qq-main", "platform")).toBe(
       "test-qq-platform-secret",
     );
-    store.pin("qq-main", "qq", "qq-app");
-    expect(() => store.pin("qq-main", "qq", "another")).toThrow();
-    const rotated = store.issue("cfl");
+    await store.pin("qq-main", "qq", "qq-app");
+    await expect(store.pin("qq-main", "qq", "another")).rejects.toBeDefined();
+    const rotated = await store.issue("cfl");
     expect(store.authenticate(s.token)).toBeUndefined();
     expect(store.authenticate(rotated)).toBe("cfl");
-    store.close();
+    await store.close();
     const bytes = await readFile(join(s.config.data_dir, "post.sqlite"));
     expect(bytes.includes(Buffer.from("test-qq-platform-secret"))).toBe(false);
     expect(bytes.includes(Buffer.from(rotated))).toBe(false);
     await writeFile(s.config.master_key_file, Buffer.alloc(32, 8));
-    expect(() => new Store(s.config)).toThrow();
+    await expect(Store.open(s.config)).rejects.toBeDefined();
     await writeFile(s.config.master_key_file, Buffer.alloc(32, 7));
-    store = new Store(s.config);
-    store.db.run("UPDATE vault SET cipher=? WHERE ref='qq-secret'", [
-      Buffer.from("tampered"),
-    ]);
-    expect(() => store.secret("qq-secret", "qq-main", "platform")).toThrow();
-    store.close();
+    store = await Store.open(s.config);
+    await store.db.set(
+      "post_vault",
+      { ref: "qq-secret" },
+      { cipher: Uint8Array.from(Buffer.from("tampered")).buffer },
+    );
+    await expect(
+      store.secret("qq-secret", "qq-main", "platform"),
+    ).rejects.toBeDefined();
+    await store.close();
   } finally {
     await s.close();
   }
@@ -407,16 +418,16 @@ test("vault ciphertext, wrong-key/tamper failures, exclusive owner, token rotati
 test("strict config rejects unknown fields, duplicate IDs and unsafe refs", async () => {
   const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
   try {
-    expect(ConfigSchema.parse(s.config)).toBeDefined();
-    expect(() => ConfigSchema.parse({ ...s.config, unknown: true })).toThrow();
+    expect(ConfigSchema(s.config)).toBeDefined();
+    expect(() => ConfigSchema({ ...s.config, unknown: true })).toThrow();
     expect(() =>
-      ConfigSchema.parse({
+      ConfigSchema({
         ...s.config,
         accounts: [...s.config.accounts, s.config.accounts[0]],
       }),
     ).toThrow();
     expect(() =>
-      ConfigSchema.parse({
+      ConfigSchema({
         ...s.config,
         accounts: [{ ...s.config.accounts[0], credential: "../secret" }],
       }),
@@ -464,9 +475,15 @@ test("all part validation precedes native send; confirmation survives actual SQL
       f.p.calls.filter((c) => c.path.includes("/send/m.room.message/")).at(-1)!
         .body["m.mentions"],
     ).toEqual({ user_ids: ["@owner:fixture"] });
-    f.r.store.db.exec(
-      "CREATE TRIGGER fail_archive BEFORE INSERT ON messages BEGIN SELECT RAISE(FAIL,'test storage failure'); END",
-    );
+    const create = f.r.store.db.create;
+    vi.spyOn(f.r.store.db, "create").mockImplementation(async function (
+      this: any,
+      table: any,
+      data: any,
+    ): Promise<any> {
+      if (table === "post_messages") throw new Error("owned archive failure");
+      return create.call(this, table, data);
+    });
     const confirmed = await f.r.service.call("cfl", "send_message", {
       ...target,
       request_id: "confirmed-no-archive",
@@ -475,7 +492,7 @@ test("all part validation precedes native send; confirmation survives actual SQL
     expect(confirmed.status).toBe("sent");
     expect(confirmed.stored).toBe(false);
     expect(confirmed.parts[0].native_message_ids).toHaveLength(1);
-    expect(f.r.service.status().healthy).toBe(false);
+    expect((await f.r.service.status()).healthy).toBe(false);
   } finally {
     await f.close();
   }
@@ -484,7 +501,7 @@ test("all part validation precedes native send; confirmation survives actual SQL
 test("oversize/stalled assets fail within bound with no invented bytes; token revocation denies HTTP", async () => {
   const f = await fixture(400);
   try {
-    f.s.config.max_asset_bytes = 4;
+    f.r.service.config.max_asset_bytes = 4;
     const headers = {
       Authorization: "Bearer " + f.s.token,
       "Content-Type": "application/octet-stream",
@@ -518,7 +535,7 @@ test("oversize/stalled assets fail within bound with no invented bytes; token re
     ).toBe(408);
     uploadAbort.abort();
     expect(Date.now() - then).toBeLessThan(1300);
-    f.r.store.db.run("DELETE FROM tokens WHERE agent=?", ["cfl"]);
+    await f.r.store.revoke("cfl");
     expect(
       (
         await fetch(f.r.http.url + "/assets", {
@@ -546,9 +563,8 @@ test("Matrix private sender admission and media-only wake use real sync; native 
       { room_id: "!dm:fixture", sender: "@denied:fixture" },
     );
     await until(
-      () =>
-        (f.r.store.db.query("SELECT count(*) n FROM messages").get() as any)
-          .n === 1,
+      async () =>
+        (({ n: await count(f.r.store.db, "messages") }) as any).n === 1,
     );
     expect(
       (
@@ -559,9 +575,13 @@ test("Matrix private sender admission and media-only wake use real sync; native 
       ).items,
     ).toEqual([]);
     expect(f.receiver.attempts).toHaveLength(0);
-    const denied = f.r.service.message(
-      (f.r.store.db.query("SELECT id FROM messages").get() as any).id,
-    )!;
+    const denied = (await f.r.service.message(
+      (
+        (
+          await f.r.store.db.get("post_messages", {}, { fields: ["id"] })
+        )[0] as any
+      ).id,
+    ))!;
     await expect(
       f.r.service.call("cfl", "get_asset", {
         asset_id: denied.assets[0]!.asset_id,
@@ -575,7 +595,7 @@ test("Matrix private sender admission and media-only wake use real sync; native 
       },
       { room_id: "!dm:fixture", sender: "@owner:fixture" },
     );
-    await until(() => f.receiver.attempts.length === 1);
+    await until(async () => f.receiver.attempts.length === 1);
     const accepted = PostEventV1.parse(JSON.parse(f.receiver.attempts[0]!));
     expect(accepted.wake.reason).toBe("direct_message");
     expect(accepted.message.content.every((c) => c.type !== "text")).toBe(true);

@@ -1,71 +1,106 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { test, expect } from "bun:test";
-import { writeFile, readFile, readdir, mkdir, stat } from "node:fs/promises";
-import { join } from "node:path";
-import { stringify } from "@iarna/toml";
+import { test, expect } from "vitest";
+import {
+  writeFile,
+  readFile,
+  readdir,
+  mkdir,
+  stat,
+  access,
+  copyFile,
+} from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { join, resolve } from "node:path";
+import { stringify } from "yaml";
 import { stateFixture, until } from "./fixtures/state";
 import { platformsFixture } from "./fixtures/platforms";
+import { processFixture } from "./fixtures/process";
 import { Store } from "../src/store";
-test("built artifact CLI validates without state, provisions offline, locks, serves and stops in isolated HOME", async () => {
+test("extracted Node artifact validates without writes, provisions, locks, crashes and reconciles without native resend", async () => {
   const p = await platformsFixture(),
     s = await stateFixture(p.url, "http://127.0.0.1:1");
-  const artifact = join(s.dir, "post.js");
-  const env = { ...process.env, HOME: join(s.dir, "home") };
-  await mkdir(env.HOME);
-  const run = async (args: string[], input?: string) => {
-    const child = Bun.spawn(["bun", artifact, ...args], {
-      cwd: s.dir,
-      env,
-      stdin: input ? new Blob([input]) : "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [code, out, err] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
-    return { code, out, err };
+  const artifactRoot = join(s.dir, "artifact");
+  await mkdir(artifactRoot);
+  execFileSync("tar", [
+    "-xzf",
+    resolve("dist/lamplit-post-node24.tar.gz"),
+    "-C",
+    artifactRoot,
+  ]);
+  const artifact = join(artifactRoot, "dist/cli.cjs"),
+    plugin = join(artifactRoot, "dist/post-plugin.cjs");
+  const home = join(s.dir, "home");
+  await mkdir(home);
+  const preload = join(s.dir, "network-preload.mjs");
+  await copyFile(resolve("tests/fixtures/network-preload.mjs"), preload);
+  const env = {
+    ...process.env,
+    NODE_OPTIONS: "--import=" + preload,
+    POST_TEST_PLATFORM_ORIGIN: p.url,
+    HOME: home,
+    XDG_CONFIG_HOME: home,
+    PATH: process.env.PATH,
   };
-  let serving: ReturnType<typeof Bun.spawn> | undefined;
-  try {
-    const build = Bun.spawn(
-      ["bun", "build", "src/cli.ts", "--target=bun", "--outfile", artifact],
-      { stdout: "ignore", stderr: "pipe" },
+  const run = (args: string[], input?: string) =>
+    processFixture([artifact, ...args], { cwd: s.dir, env, input }).exited;
+  let serving: ReturnType<typeof processFixture> | undefined;
+  let client: Client | undefined;
+  const connect = async (url: string, token: string) => {
+    const c = new Client({ name: "artifact-probe", version: "1" });
+    await c.connect(
+      new StreamableHTTPClientTransport(new URL(url + "/mcp"), {
+        requestInit: { headers: { Authorization: "Bearer " + token } },
+      }),
     );
-    expect(await build.exited).toBe(0);
+    return c;
+  };
+  try {
     const before = await readdir(s.dir);
     expect((await run(["--help"])).code).toBe(0);
     expect(await readdir(s.dir)).toEqual(before);
     const config = {
       ...s.config,
       data_dir: join(s.dir, "new-data"),
-      accounts: s.config.accounts.filter((a) => a.platform === "matrix"),
-      bindings: s.config.bindings.map((b) => ({
-        ...b,
-        scopes: b.scopes.filter((x) => x.account_id === "matrix-main"),
-      })),
+      accounts: s.config.accounts,
+      bindings: s.config.bindings,
     };
-    const configPath = join(s.dir, "post.toml");
-    await writeFile(configPath, stringify(config as any), { mode: 0o600 });
-    expect((await run(["config-check", "--config", configPath])).code).toBe(0);
-    expect(await Bun.file(join(config.data_dir, "post.sqlite")).exists()).toBe(
-      false,
-    );
-    await writeFile(configPath, stringify({ ...config, typo: true } as any));
-    expect((await run(["serve", "--config", configPath])).code).toBe(1);
-    expect(await Bun.file(join(config.data_dir, "post.sqlite")).exists()).toBe(
-      false,
-    );
-    await writeFile(configPath, stringify(config as any));
+    const path = join(s.dir, "koishi.yml");
+    const write = (cfg: unknown) =>
+      writeFile(
+        path,
+        stringify({
+          daemon: { autoRestart: false },
+          plugins: { [plugin]: cfg },
+        }),
+        { mode: 0o600 },
+      );
+    await write(config);
+    const initial = await readFile(path);
+    expect((await run(["config-check", "--config", path])).code).toBe(0);
+    expect(await readFile(path)).toEqual(initial);
+    await write({ ...config, data_dir: "${{ env.POST_DATA }}" });
+    expect((await run(["config-check", "--config", path])).code).toBe(1);
+    await write(config);
+    await expect(access(config.data_dir)).rejects.toBeDefined();
+    for (const args of [
+      ["serve", "--config", path, "--typo", "yes"],
+      ["credential-put", "--config", path],
+      ["token-issue", "--config", path, "--agent", "missing"],
+    ])
+      expect((await run(args)).code).toBe(1);
+    await expect(access(config.data_dir)).rejects.toBeDefined();
+    await write({ ...config, typo: true });
+    expect((await run(["serve", "--config", path])).code).toBe(1);
+    await expect(access(config.data_dir)).rejects.toBeDefined();
+    await write(config);
     expect(
       (
         await run(
           [
             "credential-put",
             "--config",
-            configPath,
+            path,
             "--ref",
             "matrix-secret",
             "--account",
@@ -83,7 +118,7 @@ test("built artifact CLI validates without state, provisions offline, locks, ser
           [
             "credential-put",
             "--config",
-            configPath,
+            path,
             "--ref",
             "receiver-secret",
             "--account",
@@ -95,39 +130,74 @@ test("built artifact CLI validates without state, provisions offline, locks, ser
         )
       ).code,
     ).toBe(0);
+    expect(
+      (
+        await run(
+          [
+            "credential-put",
+            "--config",
+            path,
+            "--ref",
+            "qq-secret",
+            "--account",
+            "qq-main",
+            "--kind",
+            "platform",
+          ],
+          "qq-via-stdin\n",
+        )
+      ).code,
+    ).toBe(0);
     const issued = await run([
       "token-issue",
       "--config",
-      configPath,
+      path,
       "--agent",
       "cfl",
     ]);
     expect(issued.code).toBe(0);
-    expect(issued.out.trim()).toHaveLength(43);
-    const store = new Store(config);
-    expect(store.authenticate(issued.out.trim())).toBe("cfl");
-    expect((await run(["status", "--config", configPath])).code).toBe(1);
-    store.close();
-    serving = Bun.spawn(["bun", artifact, "serve", "--config", configPath], {
+    const token = issued.out.trim();
+    expect(token).toHaveLength(43);
+    await write({
+      ...config,
+      timeout_ms: 200,
+      accounts: config.accounts.map((a) => ({
+        ...a,
+        native_id: a.platform === "matrix" ? "@wrong:fixture" : a.native_id,
+      })),
+    });
+    const failedStart = await run(["serve", "--config", path]);
+    expect(failedStart.code).toBe(1);
+    await write(config);
+    const store = await Store.open(config);
+    expect(store.authenticate(token)).toBe("cfl");
+    expect((await run(["status", "--config", path])).code).toBe(1);
+    await store.close();
+    serving = processFixture([artifact, "serve", "--config", path], {
       cwd: s.dir,
       env,
-      stdout: "pipe",
-      stderr: "pipe",
     });
-    const stdout = serving.stdout as ReadableStream<Uint8Array>;
-    const reader = stdout.getReader();
-    const initial = await reader.read();
-    expect(new TextDecoder().decode(initial.value)).toContain('"ready":true');
-    expect((await run(["status", "--config", configPath])).code).toBe(1);
-    const initialStatus = JSON.parse(new TextDecoder().decode(initial.value));
-    const client = new Client({ name: "crash-probe", version: "1" });
-    await client.connect(
-      new StreamableHTTPClientTransport(new URL(initialStatus.url + "/mcp"), {
-        requestInit: {
-          headers: { Authorization: "Bearer " + issued.out.trim() },
-        },
-      }),
-    );
+    let ready = await serving.ready();
+    expect((await run(["status", "--config", path])).code).toBe(1);
+    client = await connect(ready.url, token);
+    expect((await client.listTools()).tools).toHaveLength(7);
+    const upload = await fetch(ready.url + "/assets", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + token,
+        "Content-Type": "application/octet-stream",
+      },
+      body: "artifact bytes",
+    });
+    expect(upload.status).toBe(201);
+    const asset = (await upload.json()) as any;
+    expect(
+      await (
+        await fetch(ready.url + asset.download_path, {
+          headers: { Authorization: "Bearer " + token },
+        })
+      ).text(),
+    ).toBe("artifact bytes");
     p.stall();
     const args = {
       account_id: "matrix-main",
@@ -140,55 +210,119 @@ test("built artifact CLI validates without state, provisions offline, locks, ser
       .catch((e) => e);
     await until(() => p.sendCount === 1);
     serving.kill("SIGKILL");
-    await serving.exited;
-    await reader.cancel();
-    await client.close();
+    const crashed = await serving.exited;
+    expect(crashed.out + crashed.err).not.toContain("qq-via-stdin");
+    expect(crashed.out + crashed.err).not.toContain("secret-via-stdin");
+    expect(crashed.out + crashed.err).not.toContain(token);
     await pending;
+    await client.close();
+    client = undefined;
     await until(() => p.aborts === 1);
     p.stall(false);
-    serving = Bun.spawn(["bun", artifact, "serve", "--config", configPath], {
+    serving = processFixture([artifact, "serve", "--config", path], {
       cwd: s.dir,
       env,
-      stdout: "pipe",
-      stderr: "pipe",
     });
-    const restartReader = (
-      serving.stdout as ReadableStream<Uint8Array>
-    ).getReader();
-    const restarted = JSON.parse(
-      new TextDecoder().decode((await restartReader.read()).value),
-    );
-    const retryClient = new Client({ name: "reconcile", version: "1" });
-    await retryClient.connect(
-      new StreamableHTTPClientTransport(new URL(restarted.url + "/mcp"), {
-        requestInit: {
-          headers: { Authorization: "Bearer " + issued.out.trim() },
-        },
-      }),
-    );
-    const reconciled = await retryClient.callTool({
+    ready = await serving.ready();
+    client = await connect(ready.url, token);
+    const result = await client.callTool({
       name: "send_message",
       arguments: args,
     });
-    expect((reconciled.structuredContent as any).status).toBe("unknown");
+    expect((result.structuredContent as any).status).toBe("unknown");
     expect(p.sendCount).toBe(1);
-    await retryClient.close();
-    serving.kill("SIGTERM");
-    expect(await serving.exited).toBe(0);
-    await restartReader.cancel();
-    serving = undefined;
-    expect((await run(["status", "--config", configPath])).code).toBe(0);
     expect(
-      (await run(["token-revoke", "--config", configPath, "--agent", "cfl"]))
-        .code,
+      await (
+        await fetch(ready.url + asset.download_path, {
+          headers: { Authorization: "Bearer " + token },
+        })
+      ).text(),
+    ).toBe("artifact bytes");
+    await client.close();
+    client = undefined;
+    serving.kill("SIGTERM");
+    const stopped = await serving.exited;
+    expect(stopped.signal === "SIGTERM" || stopped.code === 0).toBe(true);
+    serving = undefined;
+    expect((await run(["status", "--config", path])).code).toBe(0);
+    expect(
+      (await run(["token-revoke", "--config", path, "--agent", "cfl"])).code,
     ).toBe(0);
+    expect((await readFile(path, "utf8")).includes("secret-via-stdin")).toBe(
+      false,
+    );
+    expect((await readFile(path, "utf8")).includes(token)).toBe(false);
     expect((await stat(config.data_dir)).mode & 0o077).toBe(0);
     const bytes = await readFile(join(config.data_dir, "post.sqlite"));
     expect(bytes.includes(Buffer.from("secret-via-stdin"))).toBe(false);
+    expect(bytes.includes(Buffer.from(token))).toBe(false);
   } finally {
+    await client?.close();
     serving?.kill("SIGKILL");
     if (serving) await serving.exited;
     await p.close();
     await s.close();
   }
-}, 20000);
+}, 30000);
+
+test("official CLI exits nonzero and releases ownership on provider startup rejection before database publication", async () => {
+  const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
+  const artifact = join(s.dir, "start-failure-artifact");
+  await mkdir(artifact);
+  execFileSync("tar", [
+    "-xzf",
+    resolve("dist/lamplit-post-node24.tar.gz"),
+    "-C",
+    artifact,
+  ]);
+  const preload = join(s.dir, "reject-stamp.cjs"),
+    config = join(s.dir, "start-failure.yml");
+  await writeFile(
+    preload,
+    `const {DatabaseSync}=require('node:sqlite');const {writeSync}=require('node:fs');const original=DatabaseSync.prototype.exec;DatabaseSync.prototype.exec=function(sql,...args){if(sql.includes('PRAGMA application_id=1347375956')){writeSync(2,'OWNED_STAMP_REJECTION\\n');throw Error('owned stamping failure')}return original.call(this,sql,...args)};`,
+  );
+  const fresh = { ...s.config, data_dir: join(s.dir, "start-failure-state") };
+  await writeFile(
+    config,
+    stringify({
+      daemon: { autoRestart: false },
+      plugins: { [join(artifact, "dist/post-plugin.cjs")]: fresh },
+    }),
+    { mode: 0o600 },
+  );
+  const child = processFixture(
+    [join(artifact, "dist/cli.cjs"), "serve", "--config", config],
+    {
+      cwd: s.dir,
+      env: {
+        ...process.env,
+        HOME: s.dir,
+        XDG_CONFIG_HOME: s.dir,
+        NODE_OPTIONS: "--require " + preload,
+      },
+    },
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      child.exited,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(Error("provider startup timeout")),
+          5000,
+        );
+      }),
+    ]);
+    expect(result.err).toContain("OWNED_STAMP_REJECTION");
+    expect(result.code).toBe(1);
+    expect(result.out).not.toContain('"ready":true');
+    await expect(
+      access(join(fresh.data_dir, "owner.lock")),
+    ).rejects.toBeDefined();
+  } finally {
+    clearTimeout(timer);
+    child.kill("SIGKILL");
+    await child.exited;
+    await s.close();
+  }
+});
