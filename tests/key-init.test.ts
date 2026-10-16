@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
 import { readFile, writeFile, rm, stat, access } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { stringify } from "yaml";
+import { stringify } from "smol-toml";
 import { Store } from "../src/store";
 import { stateFixture } from "./fixtures/state";
 import { processFixture } from "./fixtures/process";
@@ -57,15 +57,8 @@ test("simultaneous fresh Node processes publish one key or refuse; no losing-key
     data_dir: join(s.dir, "race"),
     master_key_file: join(s.dir, "race-keys", "master"),
   };
-  const path = join(s.dir, "koishi.yml");
-  await writeFile(
-    path,
-    stringify({
-      daemon: { autoRestart: false },
-      plugins: { [resolve("dist/post-plugin.cjs")]: config },
-    }),
-    { mode: 0o600 },
-  );
+  const path = join(s.dir, "post.toml");
+  await writeFile(path, stringify(config), { mode: 0o600 });
   const args = [
     resolve("dist/cli.cjs"),
     "credential-put",

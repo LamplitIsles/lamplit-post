@@ -16,6 +16,8 @@ export function processFixture(
     detached: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
+  let exit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  let phase = "spawn";
   let out = "",
     err = "";
   child.stdout.on("data", (b) => (out += b));
@@ -28,7 +30,13 @@ export function processFixture(
     err: string;
   }>((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", (code, signal) => resolve({ code, signal, out, err }));
+    child.once("exit", (code, signal) => {
+      exit = { code, signal };
+    });
+    child.once("close", (code, signal) => {
+      exit = { code, signal };
+      resolve({ code, signal, out, err });
+    });
   });
   return {
     child,
@@ -47,16 +55,28 @@ export function processFixture(
         if ((e as any).code !== "ESRCH") throw e;
       }
     },
+    phase(value: string) {
+      phase = value;
+    },
     async ready() {
       let value: any;
-      await until(() => {
-        for (const line of out.split("\n"))
-          try {
-            const v = JSON.parse(line);
-            if (v.ready) value = v;
-          } catch {}
-        return value;
-      }, 10000);
+      try {
+        await until(() => {
+          for (const line of out.split("\n"))
+            try {
+              const v = JSON.parse(line);
+              if (v.ready) value = v;
+            } catch {}
+          if (!value && exit)
+            throw new Error(
+              `Child exited before readiness: phase=${phase} code=${exit.code} signal=${exit.signal}`,
+            );
+          return value;
+        }, 10000);
+      } catch (error) {
+        if (exit) throw error;
+        throw new Error(`Child readiness stalled: phase=${phase} exited=false`);
+      }
       return value;
     },
   };

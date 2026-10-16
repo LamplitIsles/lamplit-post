@@ -1,21 +1,18 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { resolve, dirname } from "node:path";
 import { fileTypeFromBuffer } from "file-type";
 import { loadConfig, privateFile } from "./config";
-import { $ } from "minato";
 import { Store } from "./store";
-import { provisionAdmin } from "./admin";
+import { Application } from "./runtime";
 const help = `Lamplit Post v1 (Node 24)
 post <command> --config FILE
-  config-check      Validate one Koishi YAML Post entry without creating state
+  config-check      Validate one Post TOML document without creating state
   credential-put --ref REF --account ID --kind platform|receiver
                     Read secret from stdin; store authenticated ciphertext offline
   token-issue --agent ID    Print one new machine-agent token, replacing previous token
   token-revoke --agent ID   Revoke machine-agent token offline
-  admin-provision --file FILE  Deliver first native admin secret to a new private file
   status            Inspect safe offline state; refuses serving lock
-  serve             Use the Koishi CLI supervisor until process-group SIGINT/SIGTERM
+  serve             Run until SIGINT/SIGTERM; drain actual I/O before releasing ownership
 post asset-upload --url BASE --file FILE
   POST_TOKEN_FILE (private) or POST_TOKEN supplies auth, never argv
 All mutation/status commands refuse a serving data-directory owner.
@@ -41,7 +38,6 @@ export async function main(argv = process.argv.slice(2)) {
     "config-check": ["config"],
     serve: ["config"],
     status: ["config"],
-    "admin-provision": ["config", "file"],
     "credential-put": ["config", "ref", "account", "kind"],
     "token-issue": ["config", "agent"],
     "token-revoke": ["config", "agent"],
@@ -94,8 +90,6 @@ export async function main(argv = process.argv.slice(2)) {
     (!v.ref || !v.account || !["platform", "receiver"].includes(v.kind ?? ""))
   )
     throw new Error("Credential fields required");
-  if (command === "admin-provision" && !v.file)
-    throw new Error("Bootstrap file required");
   const config = await loadConfig(v.config);
   if (v.agent && !config.bindings.some((b) => b.agent_id === v.agent))
     throw new Error("Agent not configured");
@@ -104,21 +98,33 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (command === "serve") {
-    const manager = (process.env.npm_config_user_agent ?? "").match(
-      /^pnpm\/(\d+)\.(\d+)\.(\d+)(?:\s|$)/,
-    );
-    if (
-      !manager ||
-      +manager[1] !== 12 ||
-      +manager[2] < 3 ||
-      (+manager[2] === 3 && +manager[3] < 4)
-    )
-      throw new Error("Start with pnpm >=12.3.4 <13 run start");
-    const configPath = resolve(v.config);
-    process.chdir(dirname(configPath));
     process.umask(0o077);
-    process.argv = [process.execPath, "koishi", "start", configPath];
-    await import("koishi/lib/cli");
+    const app = new Application(config);
+    let stopping = false;
+    const stop = () => {
+      stopping = true;
+      void app.stop().catch(() => {
+        process.exitCode = 1;
+      });
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    try {
+      await app.start();
+      if (!stopping)
+        console.log(
+          JSON.stringify({
+            ready: true,
+            url: app.http!.url,
+            status: await app.service!.status(),
+          }),
+        );
+    } catch (e) {
+      await app.stop();
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+      if (!stopping) throw e;
+    }
     return;
   }
   let secret = "";
@@ -144,9 +150,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const store = await Store.open(config);
   try {
-    if (command === "admin-provision") {
-      console.log(JSON.stringify(await provisionAdmin(store, v.file!)));
-    } else if (command === "credential-put") {
+    if (command === "credential-put") {
       await store.putSecret(v.ref!, v.account!, v.kind!, secret);
       console.log(JSON.stringify({ saved: true }));
     } else if (command === "token-issue")
@@ -157,22 +161,22 @@ export async function main(argv = process.argv.slice(2)) {
     } else
       console.log(
         JSON.stringify({
-          accounts: await store.db.get("post_identities", {}),
-          deliveries: await Promise.all(
-            ["pending", "held", "accepted", "cancelled"].map(async (state) => ({
+          accounts: store.db
+            .prepare("SELECT account,platform,native FROM identities")
+            .all(),
+          deliveries: ["pending", "held", "accepted", "cancelled"].map(
+            (state) => ({
               state,
-              count: await store.db.eval(
-                "post_deliveries",
-                (r) => $.count(r.id),
-                { state },
-              ),
-            })),
+              count: (
+                store.db
+                  .prepare("SELECT count(*) n FROM deliveries WHERE state=?")
+                  .get(state) as { n: number }
+              ).n,
+            }),
           ),
-          gaps: await store.db.get(
-            "post_gaps",
-            {},
-            { sort: { seq: "desc" }, limit: 20 },
-          ),
+          gaps: store.db
+            .prepare("SELECT * FROM gaps ORDER BY seq DESC LIMIT 20")
+            .all(),
         }),
       );
   } finally {

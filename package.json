@@ -3,40 +3,23 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "pnpm run package && node scripts/test.mjs",
+    "test": "npm run package && node scripts/test.mjs",
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build.mjs",
     "package": "node scripts/package.mjs",
-    "format": "prettier --write src tests scripts"
+    "format": "prettier --write src tests scripts",
+    "postinstall": "patch-package --error-on-fail"
   },
   "dependencies": {
     "@cordisjs/plugin-http": "0.6.3",
-    "@koishi-ce/plugin-database-sqlite": "1.2.2",
-    "@koishijs/client": "5.30.11",
-    "@koishijs/core": "4.18.11",
-    "@koishijs/loader": "4.6.11",
-    "@koishijs/plugin-adapter-qq": "4.14.0",
-    "@koishijs/plugin-analytics": "2.0.6",
-    "@koishijs/plugin-auth": "4.1.7",
-    "@koishijs/plugin-config": "2.8.7",
-    "@koishijs/plugin-console": "5.30.11",
-    "@koishijs/plugin-http": "0.6.3",
-    "@koishijs/plugin-insight": "3.5.2",
-    "@koishijs/plugin-logger": "2.6.9",
-    "@koishijs/plugin-market": "2.11.12",
-    "@koishijs/plugin-proxy-agent": "0.3.3",
-    "@koishijs/plugin-server": "3.2.9",
-    "@koishijs/plugin-status": "7.4.10",
-    "@minatojs/sql-utils": "5.6.0",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@satorijs/adapter-qq": "4.14.0",
     "@satorijs/core": "4.6.0",
     "cosmokit": "1.8.1",
     "file-type": "^22.2.0",
-    "koishi": "4.18.11",
-    "koishi-plugin-theme-vanilla": "1.1.0",
-    "matrix-js-sdk": "^44.0.0",
-    "minato": "3.7.0",
+    "matrix-js-sdk": "44.0.0",
+    "patch-package": "8.0.1",
+    "smol-toml": "1.6.0",
     "ws": "^8.22.0",
     "zod": "^4.6.7"
   },
@@ -46,22 +29,18 @@
     "esbuild": "0.28.2",
     "prettier": "^3.9.10",
     "typescript": "^7.0.2",
-    "vitest": "5.0.4",
-    "yaml": "2.9.1"
+    "vitest": "5.0.4"
   },
-  "packageManager": "pnpm@12.11.2",
   "engines": {
     "node": ">=24 <25"
   },
   "files": [
     "dist/cli.cjs",
-    "dist/post-plugin.cjs",
     "docs",
     "deploy",
-    "examples/koishi.yml",
+    "examples/post.toml",
     "LICENSE",
     "patches",
-    "pnpm-workspace.yaml",
-    "examples/koishi.managed.yml"
+    "package-lock.json"
   ]
 }

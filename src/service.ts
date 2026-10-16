@@ -1,4 +1,4 @@
-import { $ } from "minato";
+import type { Tables } from "./models";
 import { createHmac } from "node:crypto";
 import { Config, Binding, Scope } from "./config";
 import { Store, opaque, digest, checkConversationPin } from "./store";
@@ -24,25 +24,34 @@ export class Service {
   closed = false;
   constructor(public store: Store) {
     this.assets = new Assets(store);
+    this.seedConversations();
   }
   get config() {
     return this.store.config;
   }
-  async seedConversations() {
-    await this.store.db.transact(async (db) => {
+  seedConversations() {
+    this.store.transaction((db) => {
       for (const b of this.config.bindings)
         for (const scope of b.scopes) {
           const r = (
-            await db.get("post_conversations", { id: scope.conversation_id })
+            db
+              .prepare("SELECT * FROM conversations WHERE `id` = ?")
+              .all(
+                scope.conversation_id,
+              ) as unknown as Tables["conversations"][]
           )[0];
           if (r) checkConversationPin(r, scope);
           else
-            await db.create("post_conversations", {
-              id: scope.conversation_id,
-              account: scope.account_id,
-              native: scope.native_id,
-              type: scope.type,
-            });
+            db
+              .prepare(
+                "INSERT INTO conversations (`id`,`account`,`native`,`type`) VALUES (?,?,?,?) RETURNING *",
+              )
+              .get(
+                scope.conversation_id,
+                scope.account_id,
+                scope.native_id,
+                scope.type,
+              ) as unknown as Tables["conversations"];
         }
     });
   }
@@ -104,11 +113,17 @@ export class Service {
     return this.bindings(agent).some((b) => this.admitted(b, m));
   }
   async message(id: string): Promise<MessageV1 | null> {
-    const row = (await this.store.db.get("post_messages", { id }))[0];
+    const row = (
+      this.store.db
+        .prepare("SELECT * FROM messages WHERE `id` = ?")
+        .all(id) as unknown as Tables["messages"][]
+    )[0];
     return row ? JSON.parse(row.body) : null;
   }
   async assetMessages(agent: string, id: string) {
-    const links = await this.store.db.get("post_message_assets", { asset: id });
+    const links = this.store.db
+      .prepare("SELECT * FROM message_assets WHERE `asset` = ?")
+      .all(id) as unknown as Tables["message_assets"][];
     const result: MessageV1[] = [];
     for (const link of links) {
       const m = await this.message(link.message);
@@ -178,37 +193,50 @@ export class Service {
     const a = this.config.accounts.find((a) => a.id === account)!;
     if (o.sender === a.native_id && direction === "inbound") return null;
     try {
-      return (await this.store.db.transact(async (db) => {
-        const conversationQuery = {
-          account,
-          native: o.conversation_native_id,
-          type: o.conversation_type,
-        };
-        let conv = (await db.get("post_conversations", conversationQuery))[0];
+      return this.store.transaction((db) => {
+        let conv = db
+          .prepare(
+            "SELECT * FROM conversations WHERE account=? AND native=? AND type=?",
+          )
+          .get(
+            account,
+            o.conversation_native_id,
+            o.conversation_type,
+          ) as unknown as Tables["conversations"];
         if (!conv)
-          conv = await db.create("post_conversations", {
-            id: opaque("cnv"),
-            ...conversationQuery,
-          });
+          conv = db
+            .prepare(
+              "INSERT INTO conversations(id,account,native,type) VALUES(?,?,?,?) RETURNING *",
+            )
+            .get(
+              opaque("cnv"),
+              account,
+              o.conversation_native_id,
+              o.conversation_type,
+            ) as unknown as Tables["conversations"];
         const native = o.mutation
           ? o.native_id + ":" + o.mutation
           : o.native_id;
         const duplicate = (
-          await db.get("post_messages", {
-            account,
-            conversation: conv.id,
-            native,
-          })
+          db
+            .prepare(
+              "SELECT * FROM messages WHERE `account` = ? AND `conversation` = ? AND `native` = ?",
+            )
+            .all(account, conv.id, native) as unknown as Tables["messages"][]
         )[0];
         if (duplicate) return JSON.parse(duplicate.body) as MessageV1;
         const id = opaque("msg");
         const replied = o.reply_native_id
           ? (
-              await db.get("post_messages", {
-                account,
-                conversation: conv.id,
-                native: o.reply_native_id,
-              })
+              db
+                .prepare(
+                  "SELECT * FROM messages WHERE `account` = ? AND `conversation` = ? AND `native` = ?",
+                )
+                .all(
+                  account,
+                  conv.id,
+                  o.reply_native_id,
+                ) as unknown as Tables["messages"][]
             )[0]
           : null;
         const reply = replied ? (JSON.parse(replied.body) as MessageV1) : null;
@@ -240,32 +268,41 @@ export class Service {
           mutation: o.mutation ?? null,
         };
 
-        const row = await db.create("post_messages", {
-          id,
-          account,
-          conversation: conv.id,
-          native,
-          sender: o.sender,
-          body: "",
-        });
+        const row = db
+          .prepare(
+            "INSERT INTO messages (`id`,`account`,`conversation`,`native`,`sender`,`body`) VALUES (?,?,?,?,?,?) RETURNING *",
+          )
+          .get(
+            id,
+            account,
+            conv.id,
+            native,
+            o.sender,
+            "",
+          ) as unknown as Tables["messages"];
         m.sequence = row.seq;
         Message.parse(m);
         need(Buffer.byteLength(JSON.stringify(m)) <= 65536, "capacity");
-        await db.set("post_messages", { id }, { body: JSON.stringify(m) });
+        db.prepare("UPDATE messages SET `body` = ? WHERE `id` = ?").run(
+          JSON.stringify(m),
+          id,
+        );
         for (const asset of o.assets)
-          await db.upsert("post_message_assets", [
-            { asset: asset.asset_id, message: id },
-          ]);
+          db.prepare(
+            "INSERT INTO message_assets (`asset`,`message`) VALUES (?,?) ON CONFLICT DO UPDATE SET `asset` = excluded.`asset`,`message` = excluded.`message`",
+          ).run(asset.asset_id, id);
         if (!o.catchup)
           for (const b of this.config.bindings) {
             if (!this.active(b.agent_id) || !this.admitted(b, m)) continue;
             const reason = this.wake(b, m);
             if (!reason) continue;
-            const count = await db.eval(
-              "post_deliveries",
-              (row) => $.count(row.id),
-              { binding: b.id, state: ["pending", "held"] },
-            );
+            const count = (
+              db
+                .prepare(
+                  "SELECT count(*) AS n FROM deliveries WHERE `binding` = ? AND `state` IN (?,?)",
+                )
+                .get(b.id, ...["pending", "held"]) as unknown as { n: number }
+            ).n;
             need(count < this.config.backlog_limit, "capacity");
             const event = PostEventV1.parse({
               schema_version: 1,
@@ -275,17 +312,21 @@ export class Service {
               message: m,
               wake: { reason },
             });
-            await db.create("post_deliveries", {
-              id: event.delivery_id,
-              binding: b.id,
-              agent: b.agent_id,
-              message: id,
-              receiver: b.receiver_url,
-              body: JSON.stringify(event),
-            });
+            db
+              .prepare(
+                "INSERT INTO deliveries (`id`,`binding`,`agent`,`message`,`receiver`,`body`) VALUES (?,?,?,?,?,?) RETURNING *",
+              )
+              .get(
+                event.delivery_id,
+                b.id,
+                b.agent_id,
+                id,
+                b.receiver_url,
+                JSON.stringify(event),
+              ) as unknown as Tables["deliveries"];
           }
         return m;
-      })) as MessageV1;
+      }) as MessageV1;
     } catch (e) {
       this.errors.set(account, e instanceof Fault ? e.code : "storage");
       try {
@@ -365,11 +406,15 @@ export class Service {
       need(scopes.length);
       const query = name + ":" + args.account_id;
       const offset = this.offset(agent, query, args.before);
-      const rows = await this.store.db.get(
-        "post_conversations",
-        { account: args.account_id, seq: { $lt: offset } },
-        { sort: { seq: "desc" }, limit: 101 },
-      );
+      const rows = this.store.db
+        .prepare(
+          "SELECT * FROM conversations WHERE `account` = ? AND `seq` < ? ORDER BY `seq` DESC LIMIT ?",
+        )
+        .all(
+          args.account_id,
+          offset,
+          101,
+        ) as unknown as Tables["conversations"][];
       const items = [];
       let last = 0;
       for (const r of rows) {
@@ -400,10 +445,12 @@ export class Service {
       signal,
     );
     const conv = (
-      await this.store.db.get("post_conversations", {
-        id: scope.conversation_id,
-        account: scope.account_id,
-      })
+      this.store.db
+        .prepare("SELECT * FROM conversations WHERE `id` = ? AND `account` = ?")
+        .all(
+          scope.conversation_id,
+          scope.account_id,
+        ) as unknown as Tables["conversations"][]
     )[0];
     need(conv);
     if (name === "get_conversation") return this.conversation(conv);
@@ -425,15 +472,16 @@ export class Service {
             : null,
       };
     }
-    const rows = await this.store.db.get(
-      "post_messages",
-      {
-        account: scope.account_id,
-        conversation: scope.conversation_id,
-        seq: { $lt: offset },
-      },
-      { sort: { seq: "desc" }, limit: 101 },
-    );
+    const rows = this.store.db
+      .prepare(
+        "SELECT * FROM messages WHERE `account` = ? AND `conversation` = ? AND `seq` < ? ORDER BY `seq` DESC LIMIT ?",
+      )
+      .all(
+        scope.account_id,
+        scope.conversation_id,
+        offset,
+        101,
+      ) as unknown as Tables["messages"][];
     const items: MessageV1[] = [];
     let last = 0,
       budget = 0;
@@ -485,7 +533,9 @@ export class Service {
     const scope = this.scope(agent, args.account_id, args.conversation_id);
     const serialized = JSON.stringify(args);
     const old = (
-      await this.store.db.get("post_sends", { agent, request: args.request_id })
+      this.store.db
+        .prepare("SELECT * FROM sends WHERE `agent` = ? AND `request` = ?")
+        .all(agent, args.request_id) as unknown as Tables["sends"][]
     )[0];
     if (old) {
       need(old.input === serialized, "conflict");
@@ -532,17 +582,23 @@ export class Service {
         need(scope.type === "group", "invalid_request");
     }
     signal.throwIfAborted();
-    const existing = await this.store.db.transact(async (db) => {
+    const existing = this.store.transaction((db) => {
       const row = (
-        await db.get("post_sends", { agent, request: args.request_id })
+        db
+          .prepare("SELECT * FROM sends WHERE `agent` = ? AND `request` = ?")
+          .all(agent, args.request_id) as unknown as Tables["sends"][]
       )[0];
       if (row) return row;
-      await db.create("post_sends", {
-        agent,
-        request: args.request_id,
-        input: serialized,
-        result: null,
-      });
+      db
+        .prepare(
+          "INSERT INTO sends (`agent`,`request`,`input`,`result`) VALUES (?,?,?,?) RETURNING *",
+        )
+        .get(
+          agent,
+          args.request_id,
+          serialized,
+          null,
+        ) as unknown as Tables["sends"];
       return null;
     });
     if (existing) return this.send(agent, args, signal);
@@ -554,16 +610,23 @@ export class Service {
       this.config.accounts.find((a) => a.id === scope.account_id)?.platform ===
         "qq"
     ) {
-      replySequence = await this.store.db.transact(async (db) => {
-        const query = {
-          account: scope.account_id,
-          native: reply.native_message_id,
-        };
-        const row = (await db.get("post_reply_sequences", query))[0];
+      replySequence = this.store.transaction((db) => {
+        const row = db
+          .prepare(
+            "SELECT sequence FROM reply_sequences WHERE account=? AND native=?",
+          )
+          .get(
+            scope.account_id,
+            reply.native_message_id,
+          ) as unknown as Tables["reply_sequences"];
         const start = row?.sequence ?? 0;
-        await db.upsert("post_reply_sequences", [
-          { ...query, sequence: start + args.content.length },
-        ]);
+        db.prepare(
+          "INSERT INTO reply_sequences(account,native,sequence) VALUES(?,?,?) ON CONFLICT(account,native) DO UPDATE SET sequence=excluded.sequence",
+        ).run(
+          scope.account_id,
+          reply.native_message_id,
+          start + args.content.length,
+        );
         return start;
       });
     }
@@ -647,18 +710,20 @@ export class Service {
       if (!stored) halted = true;
       // Save confirmed receipts before proceeding to another native part.
       try {
-        await this.store.db.set(
-          "post_sends",
-          { agent, request: args.request_id },
-          {
-            result: JSON.stringify({
+        this.store.db
+          .prepare(
+            "UPDATE sends SET `result` = ? WHERE `agent` = ? AND `request` = ?",
+          )
+          .run(
+            JSON.stringify({
               request_id: args.request_id,
               status: "unknown",
               parts,
               stored: false,
             }),
-          },
-        );
+            agent,
+            args.request_id,
+          );
       } catch {
         halted = true;
       }
@@ -678,26 +743,40 @@ export class Service {
       stored: parts.every((p) => p.stored),
     };
     try {
-      await this.store.db.set(
-        "post_sends",
-        { agent, request: args.request_id },
-        { result: JSON.stringify(result) },
-      );
+      this.store.db
+        .prepare(
+          "UPDATE sends SET `result` = ? WHERE `agent` = ? AND `request` = ?",
+        )
+        .run(JSON.stringify(result), agent, args.request_id);
     } catch {}
     return result;
   }
   async dispatch(binding: Binding) {
     const row = (
-      await this.store.db.get(
-        "post_deliveries",
-        { binding: binding.id, state: ["pending", "held"] },
-        { sort: { seq: "asc" }, limit: 1 },
-      )
+      this.store.db
+        .prepare(
+          "SELECT * FROM deliveries WHERE `binding` = ? AND `state` IN (?,?) ORDER BY `seq` ASC LIMIT ?",
+        )
+        .all(
+          binding.id,
+          ...["pending", "held"],
+          1,
+        ) as unknown as Tables["deliveries"][]
     )[0];
     if (!row || row.due > Date.now()) return;
     const m = await this.message(row.message);
     const update = (value: any) =>
-      this.store.db.set("post_deliveries", { id: row.id }, value);
+      this.store.db
+        .prepare(
+          "UPDATE deliveries SET state=?, category=?, attempt=?, due=? WHERE id=?",
+        )
+        .run(
+          value.state,
+          value.category,
+          value.attempt ?? row.attempt,
+          value.due ?? row.due,
+          row.id,
+        );
     if (
       row.agent !== binding.agent_id ||
       !this.active(binding.agent_id) ||
@@ -752,15 +831,15 @@ export class Service {
     }
   }
   async startDispatch() {
-    for (const row of await this.store.db.get("post_deliveries", {
-      state: ["pending", "held"],
-    }))
+    for (const row of this.store.db
+      .prepare("SELECT * FROM deliveries WHERE `state` IN (?,?)")
+      .all(...["pending", "held"]) as unknown as Tables["deliveries"][])
       if (!this.config.bindings.some((b) => b.id === row.binding))
-        await this.store.db.set(
-          "post_deliveries",
-          { id: row.id },
-          { state: "cancelled", category: "binding_removed" },
-        );
+        this.store.db
+          .prepare(
+            "UPDATE deliveries SET `state` = ?,`category` = ? WHERE `id` = ?",
+          )
+          .run("cancelled", "binding_removed", row.id);
 
     for (const b of this.config.bindings)
       this.track(
@@ -787,20 +866,23 @@ export class Service {
   async status() {
     const backlog = [];
     for (const state of ["pending", "held", "accepted", "cancelled"]) {
-      const count = await this.store.db.eval(
-        "post_deliveries",
-        (r) => $.count(r.id),
-        { state },
-      );
+      const count = (
+        this.store.db
+          .prepare("SELECT count(*) AS n FROM deliveries WHERE `state` = ?")
+          .get(state) as unknown as { n: number }
+      ).n;
       if (count) backlog.push({ state, count });
     }
     let full = false;
     for (const b of this.config.bindings)
       if (
-        (await this.store.db.eval("post_deliveries", (r) => $.count(r.id), {
-          binding: b.id,
-          state: ["pending", "held"],
-        })) >= this.config.backlog_limit
+        (
+          this.store.db
+            .prepare(
+              "SELECT count(*) AS n FROM deliveries WHERE `binding` = ? AND `state` IN (?,?)",
+            )
+            .get(b.id, ...["pending", "held"]) as unknown as { n: number }
+        ).n >= this.config.backlog_limit
       )
         full = true;
     return {

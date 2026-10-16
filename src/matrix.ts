@@ -1,6 +1,6 @@
 import { boundedBytes } from "./io";
 import { logger as sdkLogger } from "matrix-js-sdk/lib/logger.js";
-import { Bot, Context } from "@koishijs/core";
+import { Bot, Context } from "@satorijs/core";
 import {
   MatrixClient,
   ClientEvent,
@@ -69,22 +69,27 @@ export class MatrixUserBot
       userId: config.native_id,
       localTimeoutMs: service.config.timeout_ms,
       useAuthorizationHeader: true,
-      fetchFn: (async (input: any, init: any) => {
-        const signal = this.service.signal(this.operations.getStore());
-        const response = await fetch(input, {
-          ...init,
-          redirect: "error",
-          signal: AbortSignal.any([
-            signal,
-            ...(init?.signal ? [init.signal] : []),
-          ]),
-        });
-        const bytes = await boundedBytes(response, signal);
-        return new Response(bytes, {
-          status: response.status,
-          headers: response.headers,
-        });
-      }) as typeof fetch,
+      // Own background SDK requests through complete body/cancellation retirement.
+      fetchFn: ((input: any, init: any) =>
+        this.service.track(
+          (async () => {
+            need(!this.stopped && !this.service.closed, "unavailable");
+            const signal = this.service.signal(this.operations.getStore());
+            const response = await fetch(input, {
+              ...init,
+              redirect: "error",
+              signal: AbortSignal.any([
+                signal,
+                ...(init?.signal ? [init.signal] : []),
+              ]),
+            });
+            const bytes = await boundedBytes(response, signal);
+            return new Response(bytes, {
+              status: response.status,
+              headers: response.headers,
+            });
+          })(),
+        )) as typeof fetch,
     });
     this.client.on(ClientEvent.Sync, (state, _previous, data) => {
       this.live = state === SyncState.Syncing && data?.catchingUp === false;
@@ -354,8 +359,7 @@ export class MatrixUserBot
         typeof result.event_id === "string" && result.event_id.length > 0,
         "unavailable",
       );
-      // The native SDK has confirmed an ID. Analytics counts framework events,
-      // independently of Post archive/delivery semantics (QQ already emits send).
+      // Publish the native confirmation independently of Post archive success.
       const session = this.session({
         type: "send",
         timestamp: Date.now(),

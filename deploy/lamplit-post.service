@@ -1,18 +1,16 @@
-# Template only. Supply the reviewed Node24/pnpm12 tools and initialize app once.
+# Inert template: select a fresh standalone installation and explicit private config.
 [Unit]
-Description=Lamplit Post native managed application
+Description=Lamplit Post standalone backend
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=REPLACE_WITH_SERVICE_USER
-WorkingDirectory=/home/REPLACE_WITH_SERVICE_USER/.local/share/lamplit-post/app
-Environment=PATH=/opt/node24/bin:/opt/pnpm12/bin:/usr/bin:/bin
-ExecStart=/opt/pnpm12/bin/pnpm run start
+WorkingDirectory=/opt/lamplit-post
+ExecStart=/opt/node24/bin/node /opt/lamplit-post/dist/cli.cjs serve --config /etc/lamplit-post/post.toml
 Restart=on-failure
 RestartSec=5s
-TimeoutStartSec=150s
 TimeoutStopSec=40s
 KillSignal=SIGTERM
 KillMode=control-group

@@ -1,84 +1,94 @@
-# Operating Post v1
+# Standalone Post operations
 
-Post runs a Node 24 Koishi CLI supervisor and one worker application on loopback. Platform identities belong to Post; agent execution sessions belong to the consumer. This guide prepares a target deployment; implementation tests never install or mutate a real service.
+Use Node 24. Extract the complete reviewed archive into a new private directory.
+Record `revision.json`, `artifact-manifest.json` and archive SHA256. A dirty-tree
+artifact is development evidence. Do not extract over an initialized installation.
 
-## Artifact and private paths
+This artifact runs a headless backend. There is no browser administration,
+plugin market, supervisor, administrator account or online configuration service.
+The current deployed managed app/unit is a different artifact and requires a
+later explicit operator handoff. Do not point this artifact at its database or
+replace its configuration/key. Merge alone does not deploy anything.
 
-Build with Node24 and the committed pnpm lockfile. The complete writable app seed is
-`dist/lamplit-post-node24.tar.gz`; follow [native managed Console](native-managed-console.md)
-for its one-time extraction, required pnpm startup, first human administrator,
-management pages, narrow dependency repairs and update/rollback procedure.
-Default app root is `~/.local/share/lamplit-post/app`. The app owns one manifest,
-lockfile, YAML and module tree; native Market/Config mutate them normally.
+## Configuration and offline enrollment
 
-Keep app/config/data/key parents private (0700) and YAML0600. The sole YAML's
-relative paths resolve from the app root; key stays outside SQLite data. The
-normal seed is `examples/koishi.managed.yml`; `examples/koishi.yml` shows populated
-account/binding fields. Verify all native IDs/homeserver/receiver routes before
-connecting. QQ IDs are App-scoped. Private scopes require explicit native peer
-allowlists; empty lists deny. Matrix private-room sends recheck all joined peers.
-Agent execution sessions stay with the consumer, independently of IM routing.
-
-Read-only validation/help from app root:
+Copy `examples/post.toml` to a private config directory and edit verified account,
+conversation and receiver identities. Paths resolve from that file's directory,
+independently of the process cwd. The sole parser accepts TOML; unknown fields,
+unsafe endpoints, duplicate identities and conflicting conversation IDs fail.
+Use API18787 for the current-host example to avoid CFL8787. Loopback is the
+only listener host; use a deliberate TLS/private-network boundary beyond it.
 
 ```sh
-pnpm run config-check
-node dist/cli.cjs --help
+node /opt/post/dist/cli.cjs config-check --config /etc/post/post.toml
+node /opt/post/dist/cli.cjs --help
 ```
 
-First state initialization (including offline credential provisioning) obtains exclusive ownership and automatically creates the configured external key **only if state is fresh**. It publishes a cryptographically random private key atomically and fsyncs the file/parent before sealing credentials. Repeat invocations reuse identical bytes. An already supplied private 32-byte key is accepted. No implicit overwrite or rotation occurs. Missing key with existing state, malformed key, wrong key, unreadable key or failed vault authentication stops initialization. Restore the original key; never create a replacement for an existing vault. `--help` and invalid config have no initialization side effects.
+These read-only commands create no data directory, key, lock or database.
+Config must be a regular file and its directory/file must not be writable by
+other users. The data directory and external key must be private (0700/0600).
+The key must remain outside the data directory. Fresh initialization creates it
+atomically and syncs it; losing the key for existing state is an error.
 
-## Offline provisioning and rotation
-
-Stop the serving instance before any offline operation. Every state-opening CLI command refuses a serving directory lock. Use a private stdin pipe, not a literal secret in argv, shell history, Koishi YAML or a log. The following reads already prepared private files; choose test-owned paths when rehearsing:
+Stop the standalone process before offline provisioning. Pipe secrets from a
+private source to stdin; never put secret values in TOML, argv or shell history:
 
 ```sh
-node dist/cli.cjs credential-put --config koishi.yml --ref qq-platform --account qq-main --kind platform < /private/qq-app-secret
-node dist/cli.cjs credential-put --config koishi.yml --ref matrix-platform --account matrix-main --kind platform < /private/matrix-access-token
-node dist/cli.cjs credential-put --config koishi.yml --ref partner-receiver --account partner --kind receiver < /private/receiver-bearer
-node dist/cli.cjs token-issue --config koishi.yml --agent cfl > /private/post-agent-token
+node /opt/post/dist/cli.cjs credential-put --config /etc/post/post.toml \
+  --ref qq-platform --account qq-main --kind platform < /private/qq-secret
+node /opt/post/dist/cli.cjs credential-put --config /etc/post/post.toml \
+  --ref matrix-platform --account matrix-main --kind platform < /private/matrix-token
+node /opt/post/dist/cli.cjs credential-put --config /etc/post/post.toml \
+  --ref partner-receiver --account partner --kind receiver < /private/receiver-secret
+node /opt/post/dist/cli.cjs token-issue --config /etc/post/post.toml --agent cfl > /private/agent-token
 ```
 
-Use `umask 077` before preparing token files. token-issue prints the new token once and replaces the old digest. `token-revoke --agent cfl` removes access and stops pending delivery for that agent on the next start. Platform credential rotation uses the same credential-put reference, only for the same pinned native identity. Receiver secret rotation is independent and preserves queued payload bytes for the same URL. Master-key rotation is not implemented; back up and preserve the existing key. Raw tokens are never stored in SQLite; AES-256-GCM credential ciphertext uses random nonces and authenticates reference/account/kind/version/key ID. SQLite contains a sealed key check to reject the wrong key before serving. Its application ID and version identify this supported fresh-state format; an unknown database is refused before model preparation. Legacy Post state/config is not migrated.
+Create the token delivery file with restrictive umask/permissions. Token issue
+prints the new token once and rotates the previous token; all other output is
+safe status/category data. Platform credentials, receiver secrets, external vault
+key and machine agent tokens are separate authorities.
 
-## Start, status, shutdown and failure recovery
-
-`pnpm run start` from the app root starts adapters before opening HTTP. Bounded startup failure closes owned work and fails. Success prints one safe JSON readiness record; the safe JSON readiness status contains account IDs/readiness, queue counts and error categories without native identities, bodies or secrets. `/healthz` reports only a healthy boolean (200/503), without authentication. All `/mcp` and asset requests require the independent agent Bearer. MCP has no browser Origin access and no persistent platform execution session. Its timeout includes reading the complete authenticated request body and the tool operation; an incomplete body is cancelled with HTTP 408 and its connection is closed. Do not expose loopback without an authenticated TLS reverse proxy/tunnel; upstream routing does not replace application Bearer auth.
-
-Signal the whole Koishi process group with SIGINT/SIGTERM (or use the service template’s `KillMode=control-group`). Signalling only the supervisor PID is insufficient. The worker first closes optional Console HTTP and WebSocket intake and awaits actual socket closure, then stops Post HTTP intake, aborts active platform/receiver I/O, stops sync/observation and binding workers, disposes adapter scopes, drains the provider transaction queue, closes SQLite and releases ownership. The worker releases ownership after cleanup; the maintained CLI supervises its exit. `status --config FILE` is an **offline** inspection of safe identity/account names, delivery counts and gap categories; it refuses a serving owner. Use the service journal/health during serving. Never infer healthy capture from a successfully bound HTTP socket alone.
-
-Saturation/storage failure rolls back capture+delivery, records a safe gap when writable, marks the affected path unhealthy and stops it. The durable queue holds at most configured pending+held records per binding; memory never becomes the delivery backlog. Correct capacity/storage and restart to resume capture. SQLite stores permanent actual observations and confirmations; there is no expiry or destructive cleanup. Asset finalization may leave unreferenced private files after a crash; V1 does not delete them automatically. Initial/catchup platform observations do not wake, including multiple Matrix sync batches during startup or reconnect while the SDK is still catching up; Post replays only its own committed pending queue. Platform downtime/reconnect can leave observation gaps, and QQ grants/settings can exclude ordinary group messages. This is not an upstream historical completeness promise.
-
-A dead process's recorded PID permits safe lock recovery on reopen; a live/reused PID, unreadable or malformed lock refuses. Stale-owner inspection is serialized by a short recovery marker; a leftover marker requires operator inspection. After a host/container PID-namespace change, inspect ownership before removing a stale lock manually. Never remove a live serving lock or run two owners against the same directory. Offline failures do not install a service or alter any other target.
-
-Pending webhook deliveries are serial per binding, independent across bindings, with bounded requests and capped retry backoff. Any 2xx is terminal durable receiver acceptance. Changing the receiver URL holds its original snapshot; restore the intended URL for correction. Removed/revoked authorization cancels pending deliveries with a safe audit category. Never edit queued bodies to reroute old data. A consumer must authenticate, schema-validate and durably deduplicate delivery_id before ACK. CFL keeps one existing execution session for QQ and Matrix and never repeats Post wake classification.
-
-Send request_id is durable and agent-scoped. Exact retries return the previous result; different input with the same ID conflicts. There is no automatic native resend after an uncertain response or crash. sent/failed/unknown/partial and per-part native receipts are factual. stored:false reports local persistence failure even when native confirmation exists. QQ replies require a same-conversation stored message within the platform lifetime; expired replies fail preflight and never become proactive sends. Audio/video are ordinary files on send; no voice/video codec, STT or TTS is installed.
-
-## Assets and capabilities
-
-Remote clients upload raw bytes to authenticated `POST /assets`; download only the exact returned same-origin `/assets/<id>` route with agent auth. Default asset limit 16 MiB and request/send timeout 30s; temporary streaming writes finalize atomically. Image signatures must match supported raster MIME types; SVG is excluded. Generic files remain attachments, never executable instructions. Native media download failures retain unavailable metadata; credentials and expiring native URLs stay internal. Every image reference is checked for supported MIME and matching stored byte signatures before any part of a send is dispatched. Own uploads require the owning agent; message media also requires source admission and current Matrix joined/plaintext access. QQ direct-conversation admission requires its native peer in the binding sender allowlist for history, message assets and sends; an authorized peer scope includes the bot’s confirmed outbound history. Knowing an ID grants no access.
-
-The terminal helper uses a private file/environment token, never argv:
+## Start, stop and diagnose
 
 ```sh
-POST_TOKEN_FILE=/private/post-agent-token node dist/cli.cjs asset-upload --url http://127.0.0.1:18787 --file ./picture.png
+node /opt/post/dist/cli.cjs serve --config /etc/post/post.toml
+node /opt/post/dist/cli.cjs status --config /etc/post/post.toml
+node /opt/post/dist/cli.cjs token-revoke --config /etc/post/post.toml --agent cfl
 ```
 
-QQ ordinary-group member-list API has no public authenticated list mapping in pinned adapter 4.14.0. V1 returns unsupported; it never substitutes channels or observed senders. Matrix uses getJoinedRoomMembers and returns permission_required/unavailable honestly on upstream failure. Account identity is verified during startup, not fetched per tool call. No E2EE, Matrix AS, custom Post business dashboard, FTS, MCP Events, native audio codecs, or old-gateway historical import.
+Status and offline mutations refuse the serving lease. During serve, `/healthz`
+exposes safe readiness/backlog categories. MCP and assets require the agent
+Bearer on every request. The CLI prints readiness only after SDK startup and
+listener binding. SIGINT/SIGTERM abort and drain actual I/O before releasing
+the database/key lease. Startup never installs dependencies or downloads code.
+The [service template](../deploy/lamplit-post.service) is inert until an operator
+selects paths/user and explicitly installs it.
 
-For synthesized speech, the agent selects and calls a separate TTS tool, obtains a local audio file, uses the existing authenticated upload path/helper, then explicitly sends that asset to an account/conversation. Post supplies authorized transport, durable asset/message records and honest send outcomes. Generation method grants no additional media privileges. Post has no synthesis, voice/model selection, TTS provider registry/credentials or automatic assistant-to-speech behavior. Incoming STT is deferred. Native voice-bubble rendering, codecs and transcoding are a separate deferred capability; an uploaded audio file remains an ordinary V1 attachment.
+`incompatible_state` means unsupported format. `conflict` can indicate another
+owner or persisted identity mismatch. `unavailable` includes vault authentication
+failure. Inspect the owner before stale-lock recovery; never delete a key/database
+to make startup succeed. Raw upstream errors/messages are intentionally absent
+from logs. Reconfigure only while stopped and validate before restarting.
 
-## Consistent backup and restore
+Asset helper:
 
-Stop Post cleanly and confirm the process exited. Back up the entire private data directory after provider close (SQLite plus assets and any SQLite journal files), the YAML and the **separate external master-key file**. Preserve permissions. Encrypt backups containing history/media and store the key backup separately with controlled access. A copy of SQLite alone cannot decrypt credentials or restore media. Never copy only the live main SQLite file during a live transaction. No backup task deletes source state.
+```sh
+POST_TOKEN_FILE=/private/agent-token node /opt/post/dist/cli.cjs asset-upload \
+  --url http://127.0.0.1:18787 --file ./picture.png
+```
 
-Restore into explicitly chosen empty private paths while Post is stopped; restore the matching database/media/key set and configure their new paths. Revalidate config and permissions, then run offline status and start the restored instance on loopback. Verify identity pins, authorized historical assets, pending delivery behavior and token access. Reissue agent/receiver tokens deliberately when needed; never replace the restored master key. Rehearse against owned fixtures before a target restore.
+## Backup and update
 
-## Orc-owned deployment and cutover
+Stop the entire standalone process and verify ownership released. Save a private
+snapshot of data (database and assets), external key, TOML, artifact and revision.
+Restore matching standalone snapshots only; do not merge data or create a second
+writer. Unknown sends remain unresolved on reopen, and receiver retry snapshots
+retain their original destination/body. Back up the external key separately with
+access controls; token revocation does not replace the encryption key.
 
-After the relevant Post/ko PRs pass independent review and merge, Orc selects the actual target/user/paths, builds the exact reviewed revision, provisions authorized credentials, and installs a path-adjusted copy of `deploy/lamplit-post.service`. Deployment remains paused. The template is inert until deliberately installed by Orc; replace User, Node/pnpm paths, app root and writable paths. Ensure external key parent ownership allows only that service user. Run the repository package/help/config checks against the selected config before enabling the service. Set service stop timeout above Post's bounded request timeout plus socket-close allowance.
-
-Orc then starts Post, checks health/safe status, configures CFL with the exact v1 contract, dedicated receiver auth, Post base URL and agent token; verifies an authorized QQ and Matrix message enters the same existing session; verifies native replies and one image/file roundtrip; and only then disables the replaced per-platform gateway wiring/services. Preserve existing consumer history/session and back up configurations for rollback. Keet remains outside this cutover. A merge is not deployment. This Worker has performed no live install, credentials, real IM sends or cutover.
-
-For rollback, stop the new Post/CFL wiring, preserve its data/key/queue, and restore the backed-up former routing intentionally. Do not auto-replay unknown sends or blindly replay committed wake deliveries into a new consumer identity. Record exact deployed revisions and observed target results separately from isolated acceptance.
+The standalone format is application ID0x504f5354/user_version2, unprefixed domain
+tables plus meta version1. The previous framework post_* format and older Bun
+files lack this exact header/version contract and are refused. No migration,
+compatibility parser or reset operation is included. Any future actual transition
+from the current managed installation must decide fresh state separately and
+preserve the installed files until the operator authorizes that transition.

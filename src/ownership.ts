@@ -17,7 +17,7 @@ import { join, dirname } from "node:path";
 import type { Config } from "./config";
 import { Fault, need } from "./errors";
 
-/** Exclusive local ownership is acquired before framework database startup. */
+/** Exclusive local ownership is acquired before SQLite startup. */
 export class Ownership {
   key!: Buffer;
   lock: string;
@@ -48,7 +48,7 @@ export class Ownership {
         if (
           header.subarray(0, 16).toString() !== "SQLite format 3\0" ||
           header.readUInt32BE(68) !== 0x504f5354 ||
-          header.readUInt32BE(60) !== 1
+          header.readUInt32BE(60) !== 2
         )
           throw new Fault("unavailable", "Incompatible state");
         need(!(statSync(database).mode & 0o077), "invalid_request");

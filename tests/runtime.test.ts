@@ -1,13 +1,12 @@
 import { count } from "./fixtures/state";
 import { test, expect } from "vitest";
-import type { PostDatabase } from "../src/models";
 import { start } from "../src/runtime";
 import { platformsFixture } from "./fixtures/platforms";
 import { stateFixture, until } from "./fixtures/state";
 import { consumerFixture } from "./fixtures/consumer";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-test("real Node Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", async () => {
+test("real Node Satori QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", async () => {
   const p = await platformsFixture(),
     receiver = await consumerFixture(true),
     state = await stateFixture(p.url, receiver.url);
@@ -16,9 +15,7 @@ test("real Node Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", 
   try {
     r = await start(state.config, { qqOrigin: p.url, qqGateway: p.gateway });
     expect(
-      await (r.context.database as unknown as PostDatabase).get("post_tokens", {
-        agent: "cfl",
-      }),
+      r.store.db.prepare("SELECT * FROM tokens WHERE `agent` = ?").all("cfl"),
     ).toHaveLength(1);
     client = new Client({ name: "acceptance", version: "1" });
     await client.connect(
@@ -96,23 +93,15 @@ test("real Node Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", 
     });
     await until(
       async () =>
-        !!(
-          await r!.store.db.get(
-            "post_messages",
-            { native: "native-self-mention" },
-            { fields: ["body"] },
-          )
-        )[0],
+        !!r!.store.db
+          .prepare("SELECT `body` FROM messages WHERE `native` = ?")
+          .all("native-self-mention")[0],
     );
     const observed = JSON.parse(
       (
-        (
-          await r.store.db.get(
-            "post_messages",
-            { native: "native-self-mention" },
-            { fields: ["body"] },
-          )
-        )[0] as any
+        r.store.db
+          .prepare("SELECT `body` FROM messages WHERE `native` = ?")
+          .all("native-self-mention")[0] as any
       ).body,
     );
     expect(observed.content).toEqual([
@@ -123,23 +112,15 @@ test("real Node Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", 
       native_user_ids: [nativeMention],
     });
     expect(
-      (
-        await r.store.db.get(
-          "post_messages",
-          { native: "native-self-echo" },
-          { fields: ["body"] },
-        )
-      )[0],
+      r.store.db
+        .prepare("SELECT `body` FROM messages WHERE `native` = ?")
+        .all("native-self-echo")[0],
     ).toBeUndefined();
     const outbound = JSON.parse(
       (
-        (
-          await r.store.db.get(
-            "post_messages",
-            { native: "qq-sent-1" },
-            { fields: ["body"] },
-          )
-        )[0] as any
+        r.store.db
+          .prepare("SELECT `body` FROM messages WHERE `native` = ?")
+          .all("qq-sent-1")[0] as any
       ).body,
     );
     expect(outbound.sender.native_id).toBe("qq-user");
@@ -159,46 +140,28 @@ test("real Node Koishi QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", 
   }
 }, 15000);
 
-test("framework disposal during startup cancels native I/O before owner release", async () => {
-  const { Context } = await import("@koishijs/core");
-  const { postPlugin } = await import("../src/runtime");
+test("stop during startup cancels native I/O before owner release", async () => {
+  const { Application } = await import("../src/runtime");
   const { Store } = await import("../src/store");
-  const { access } = await import("node:fs/promises");
-  const { join } = await import("node:path");
   const p = await platformsFixture(),
     state = await stateFixture(p.url, "http://127.0.0.1:1", 3000);
-  const ctx = new Context();
-  let failed = false;
+  const app = new Application(state.config, {
+    qqOrigin: p.url,
+    qqGateway: p.gateway,
+  });
   try {
     p.tokenStall(true);
-    const fork = ctx.plugin(
-      postPlugin({
-        connect: true,
-        fixture: { qqOrigin: p.url, qqGateway: p.gateway },
-        failed: () => {
-          failed = true;
-        },
-      }),
-      state.config,
-    );
-    const starting = ctx.start();
+    const starting = app.start();
+    const rejected = expect(starting).rejects.toThrow();
     await until(() => p.calls.some((c) => c.path === "/app/getAppAccessToken"));
-    fork.dispose();
-    await until(() => failed && p.aborts > 0);
-    await starting;
-    await until(async () => {
-      try {
-        await access(join(state.config.data_dir, "owner.lock"));
-        return false;
-      } catch {
-        return true;
-      }
-    });
+    await app.stop();
+    await rejected;
+    await until(() => p.aborts > 0);
     const reopened = await Store.open(state.config);
     await reopened.close();
     expect(p.sendCount).toBe(0);
   } finally {
-    await ctx.stop();
+    await app.stop();
     await p.close();
     await state.close();
   }

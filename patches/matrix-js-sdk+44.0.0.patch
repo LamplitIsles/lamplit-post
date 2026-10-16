@@ -1,0 +1,35 @@
+diff --git a/node_modules/matrix-js-sdk/lib/http-api/utils.js b/node_modules/matrix-js-sdk/lib/http-api/utils.js
+index b34b58f3a1f5a33c55c5474a0e25f75e275c4e94..2b861ff220999ecf7b595acbed5d0fd6d5122651 100644
+--- a/node_modules/matrix-js-sdk/lib/http-api/utils.js
++++ b/node_modules/matrix-js-sdk/lib/http-api/utils.js
+@@ -21,11 +21,7 @@ import { ConnectionError, HTTPError, MatrixError, MatrixSafetyError, MatrixSafet
+ 
+ // Ponyfill for https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout
+ export function timeoutSignal(ms) {
+-  const controller = new AbortController();
+-  setTimeout(() => {
+-    controller.abort();
+-  }, ms);
+-  return controller.signal;
++  return AbortSignal.timeout(ms);
+ }
+ export function anySignal(signals) {
+   const controller = new AbortController();
+diff --git a/node_modules/matrix-js-sdk/src/http-api/utils.ts b/node_modules/matrix-js-sdk/src/http-api/utils.ts
+index 8e17de0fa1c751be6c89c6bbb32e614307a7a05c..ea828b3bae0fcea28a77e204ef58ecf3a37f18ed 100644
+--- a/node_modules/matrix-js-sdk/src/http-api/utils.ts
++++ b/node_modules/matrix-js-sdk/src/http-api/utils.ts
+@@ -29,12 +29,7 @@ import {
+ 
+ // Ponyfill for https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout
+ export function timeoutSignal(ms: number): AbortSignal {
+-    const controller = new AbortController();
+-    setTimeout(() => {
+-        controller.abort();
+-    }, ms);
+-
+-    return controller.signal;
++    return AbortSignal.timeout(ms);
+ }
+ 
+ export function anySignal(signals: AbortSignal[]): {

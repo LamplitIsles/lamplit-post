@@ -1,15 +1,11 @@
 import { defineConfig } from "vitest/config";
-import { parse } from "yaml";
 export default defineConfig({
   plugins: [
     {
-      name: "published-provider-yaml",
+      name: "domain-ddl",
       transform(code, id) {
-        if (/\.ya?ml$/.test(id))
-          return {
-            code: "export default " + JSON.stringify(parse(code)),
-            map: null,
-          };
+        if (id.endsWith(".sql"))
+          return { code: "export default " + JSON.stringify(code), map: null };
       },
     },
   ],
@@ -18,6 +14,5 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 20000,
     hookTimeout: 20000,
-    server: { deps: { inline: ["@koishi-ce/plugin-database-sqlite"] } },
   },
 });

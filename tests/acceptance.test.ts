@@ -6,7 +6,6 @@ import { start } from "../src/runtime";
 import { Store } from "../src/store";
 import { Service } from "../src/service";
 import { serve } from "../src/http";
-import { Schema } from "@koishijs/core";
 import { ConfigSchema, parseConfig } from "../src/config";
 import { platformsFixture } from "./fixtures/platforms";
 import { stateFixture, until } from "./fixtures/state";
@@ -166,11 +165,7 @@ test("all seven projections and raw assets enforce separate agent scope and priv
     });
     await until(async () => (await count(f.r.store.db, "messages")) === 1);
     const msg = (await f.r.service.message(
-      (
-        (
-          await f.r.store.db.get("post_messages", {}, { fields: ["id"] })
-        )[0] as any
-      ).id,
+      (f.r.store.db.prepare("SELECT `id` FROM messages").all()[0] as any).id,
     ))!;
     const asset = msg.assets[0]!;
     await expect(
@@ -414,11 +409,9 @@ test("vault ciphertext, wrong-key/tamper failures, exclusive owner, token rotati
     await expect(Store.open(s.config)).rejects.toBeDefined();
     await writeFile(s.config.master_key_file, Buffer.alloc(32, 7));
     store = await Store.open(s.config);
-    await store.db.set(
-      "post_vault",
-      { ref: "qq-secret" },
-      { cipher: Uint8Array.from(Buffer.from("tampered")).buffer },
-    );
+    store.db
+      .prepare("UPDATE vault SET `cipher` = ? WHERE `ref` = ?")
+      .run(Buffer.from("tampered"), "qq-secret");
     await expect(
       store.secret("qq-secret", "qq-main", "platform"),
     ).rejects.toBeDefined();
@@ -430,31 +423,16 @@ test("vault ciphertext, wrong-key/tamper failures, exclusive owner, token rotati
 test("strict config rejects unknown fields, duplicate IDs and unsafe refs", async () => {
   const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
   try {
-    expect(ConfigSchema(s.config)).toBeDefined();
+    expect(ConfigSchema.parse(s.config)).toBeDefined();
     expect(() => parseConfig({ ...s.config, unknown: true })).toThrow();
-    const browserSchema = new Schema(JSON.parse(JSON.stringify(ConfigSchema)));
-    expect(browserSchema(s.config)).toBeDefined();
     expect(() =>
-      browserSchema({
-        ...s.config,
-        bindings: [
-          {
-            ...s.config.bindings[0],
-            scopes: [
-              { ...s.config.bindings[0].scopes[0], account_id: "missing" },
-            ],
-          },
-        ],
-      }),
-    ).toThrow("Unknown account");
-    expect(() =>
-      ConfigSchema({
+      ConfigSchema.parse({
         ...s.config,
         accounts: [...s.config.accounts, s.config.accounts[0]],
       }),
     ).toThrow();
     expect(() =>
-      ConfigSchema({
+      ConfigSchema.parse({
         ...s.config,
         accounts: [{ ...s.config.accounts[0], credential: "../secret" }],
       }),
@@ -502,15 +480,9 @@ test("all part validation precedes native send; confirmation survives actual SQL
       f.p.calls.filter((c) => c.path.includes("/send/m.room.message/")).at(-1)!
         .body["m.mentions"],
     ).toEqual({ user_ids: ["@owner:fixture"] });
-    const create = f.r.store.db.create;
-    vi.spyOn(f.r.store.db, "create").mockImplementation(async function (
-      this: any,
-      table: any,
-      data: any,
-    ): Promise<any> {
-      if (table === "post_messages") throw new Error("owned archive failure");
-      return create.call(this, table, data);
-    });
+    f.r.store.db.exec(
+      "CREATE TRIGGER owned_archive_failure BEFORE INSERT ON messages BEGIN SELECT RAISE(FAIL, 'owned archive failure'); END",
+    );
     const confirmed = await f.r.service.call("cfl", "send_message", {
       ...target,
       request_id: "confirmed-no-archive",
@@ -603,11 +575,7 @@ test("Matrix private sender admission and media-only wake use real sync; native 
     ).toEqual([]);
     expect(f.receiver.attempts).toHaveLength(0);
     const denied = (await f.r.service.message(
-      (
-        (
-          await f.r.store.db.get("post_messages", {}, { fields: ["id"] })
-        )[0] as any
-      ).id,
+      (f.r.store.db.prepare("SELECT `id` FROM messages").all()[0] as any).id,
     ))!;
     await expect(
       f.r.service.call("cfl", "get_asset", {

@@ -1,7 +1,7 @@
 import { boundedBytes } from "./io";
-import { HTTP } from "@koishijs/plugin-http";
-import { Context, h } from "@koishijs/core";
-import { QQBot as QQ } from "@koishijs/plugin-adapter-qq";
+import { HTTP } from "@cordisjs/plugin-http";
+import { Context, h } from "@satorijs/core";
+import { QQBot as QQ } from "@satorijs/adapter-qq";
 import { decodeGroupMessage, type QQBot } from "@satorijs/adapter-qq";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { MatrixUserBot } from "./matrix";
@@ -10,7 +10,7 @@ import type { AccountConfig, Scope } from "./config";
 import type { Service } from "./service";
 import type { ContentV1, MessageV1 } from "../contracts/v1/index";
 import { need } from "./errors";
-/** Native endpoint replacements exist only as an injected test seam, never in YAML/API. */
+/** Native endpoint replacements exist only as an injected test seam, never in TOML/API. */
 export interface TransportFixture {
   qqOrigin?: string;
   qqGateway?: string;

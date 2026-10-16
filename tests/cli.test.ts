@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { test, expect } from "vitest";
@@ -12,14 +14,16 @@ import {
 } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
-import { stringify } from "yaml";
+import { stringify } from "smol-toml";
 import { stateFixture, until } from "./fixtures/state";
 import { platformsFixture } from "./fixtures/platforms";
 import { processFixture } from "./fixtures/process";
 import { Store } from "../src/store";
+import { consumerFixture } from "./fixtures/consumer";
 test("extracted Node artifact validates without writes, provisions, locks, crashes and reconciles without native resend", async () => {
   const p = await platformsFixture(),
-    s = await stateFixture(p.url, "http://127.0.0.1:1");
+    receiver = await consumerFixture(true),
+    s = await stateFixture(p.url, receiver.url);
   const artifactRoot = join(s.dir, "artifact");
   await mkdir(artifactRoot);
   execFileSync("tar", [
@@ -28,8 +32,7 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     "-C",
     artifactRoot,
   ]);
-  const artifact = join(artifactRoot, "dist/cli.cjs"),
-    plugin = join(artifactRoot, "post/dist/post-plugin.cjs");
+  const artifact = join(artifactRoot, "dist/cli.cjs");
   const home = join(s.dir, "home");
   await mkdir(home);
   const preload = join(s.dir, "network-preload.mjs");
@@ -38,9 +41,15 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     ...process.env,
     NODE_OPTIONS: "--import=" + preload,
     POST_TEST_PLATFORM_ORIGIN: p.url,
+    POST_TEST_RECEIVER_ORIGIN: receiver.url,
+    npm_config_user_agent: "",
     HOME: home,
     XDG_CONFIG_HOME: home,
     PATH: process.env.PATH,
+  };
+  const serveEnv = {
+    ...env,
+    POST_TEST_MODULE_GRAPH: join(s.dir, "loaded-graph.json"),
   };
   const run = (args: string[], input?: string) =>
     processFixture([artifact, ...args], { cwd: s.dir, env, input }).exited;
@@ -58,6 +67,29 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     return c;
   };
   try {
+    const inventory = JSON.parse(
+      await readFile(join(artifactRoot, "artifact-manifest.json"), "utf8"),
+    );
+    expect(
+      inventory.dependencies.filter((p: any) =>
+        /^(?:koishi(?:$|-)|@koishijs\/|@koishi-ce\/|minato$)/.test(
+          p.name ?? "",
+        ),
+      ),
+    ).toEqual([]);
+    for (const file of inventory.files) {
+      expect(
+        createHash("sha256")
+          .update(await readFile(join(artifactRoot, file.path)))
+          .digest("hex"),
+      ).toBe(file.sha256);
+    }
+    for (const link of inventory.links)
+      expect(
+        (await realpath(join(artifactRoot, link.path))).startsWith(
+          artifactRoot + "/",
+        ),
+      ).toBe(true);
     const before = await readdir(s.dir);
     expect((await run(["--help"])).code).toBe(0);
     expect(await readdir(s.dir)).toEqual(before);
@@ -67,16 +99,9 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
       accounts: s.config.accounts,
       bindings: s.config.bindings,
     };
-    const path = join(s.dir, "koishi.yml");
+    const path = join(s.dir, "post.toml");
     const write = (cfg: unknown) =>
-      writeFile(
-        path,
-        stringify({
-          daemon: { autoRestart: false },
-          plugins: { [plugin]: cfg },
-        }),
-        { mode: 0o600 },
-      );
+      writeFile(path, stringify(cfg as any), { mode: 0o600 });
     await write(config);
     const initial = await readFile(path);
     expect((await run(["config-check", "--config", path])).code).toBe(0);
@@ -84,15 +109,6 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     await write({ ...config, data_dir: "${{ env.POST_DATA }}" });
     expect((await run(["config-check", "--config", path])).code).toBe(1);
     await write(config);
-    await expect(access(config.data_dir)).rejects.toBeDefined();
-    expect(
-      (
-        await processFixture([artifact, "serve", "--config", path], {
-          cwd: s.dir,
-          env: { ...env, npm_config_user_agent: "npm/11.0.0" },
-        }).exited
-      ).code,
-    ).toBe(1);
     await expect(access(config.data_dir)).rejects.toBeDefined();
     for (const args of [
       ["serve", "--config", path, "--typo", "yes"],
@@ -137,7 +153,7 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
             "--kind",
             "receiver",
           ],
-          "receiver-via-stdin\n",
+          "test-receiver\n",
         )
       ).code,
     ).toBe(0);
@@ -186,13 +202,33 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     await store.close();
     serving = processFixture([artifact, "serve", "--config", path], {
       cwd: s.dir,
-      env,
+      env: serveEnv,
     });
     let ready = await serving.ready();
     expect((await run(["status", "--config", path])).code).toBe(1);
     stage = "initial MCP connect";
     client = await connect(ready.url, token);
     expect((await client.listTools()).tools).toHaveLength(7);
+    stage = "receiver first-attempt outage";
+    p.sendQQ("GROUP_AT_MESSAGE_CREATE", "artifact receiver wake");
+    await until(() => receiver.attempts.length === 1);
+    await client.close();
+    client = undefined;
+    const oldUrl = ready.url;
+    serving.kill("SIGTERM");
+    expect((await serving.exited).code).toBe(0);
+    await expect(fetch(oldUrl + "/healthz")).rejects.toThrow();
+    await expect(access(join(config.data_dir, "owner.lock"))).rejects.toThrow();
+    stage = "receiver restart retry";
+    serving = processFixture([artifact, "serve", "--config", path], {
+      cwd: s.dir,
+      env: serveEnv,
+    });
+    serving.phase(stage);
+    ready = await serving.ready();
+    client = await connect(ready.url, token);
+    await until(() => receiver.attempts.length === 2);
+    expect(receiver.attempts[0]).toBe(receiver.attempts[1]);
     stage = "asset upload";
     const upload = await fetch(ready.url + "/assets", {
       method: "POST",
@@ -243,7 +279,7 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     p.stall(false);
     serving = processFixture([artifact, "serve", "--config", path], {
       cwd: s.dir,
-      env,
+      env: serveEnv,
     });
     ready = await serving.ready();
     stage = "MCP reconnect after crash";
@@ -264,9 +300,21 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     ).toBe("artifact bytes");
     await client.close();
     client = undefined;
-    serving.kill("SIGTERM");
+    serving.kill("SIGINT");
     const stopped = await serving.exited;
-    expect(stopped.signal === "SIGTERM" || stopped.code === 0).toBe(true);
+    expect(stopped.code).toBe(0);
+    expect(stopped.signal).toBeNull();
+    const graph = JSON.parse(
+      await readFile(join(s.dir, "loaded-graph.json"), "utf8"),
+    ) as string[];
+    expect(graph.length).toBeGreaterThan(50);
+    expect(
+      graph.filter((path) =>
+        /node_modules\/(?:koishi|@koishijs|@koishi-ce|minato)/.test(path),
+      ),
+    ).toEqual([]);
+    await expect(fetch(ready.url + "/healthz")).rejects.toThrow();
+    await expect(access(join(config.data_dir, "owner.lock"))).rejects.toThrow();
     serving = undefined;
     expect((await run(["status", "--config", path])).code).toBe(0);
     expect(
@@ -298,11 +346,12 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     serving?.kill("SIGKILL");
     if (serving) await serving.exited;
     await p.close();
+    await receiver.close();
     await s.close();
   }
 }, 30000);
 
-test("official CLI exits nonzero and releases ownership on provider startup rejection before database publication", async () => {
+test("direct CLI exits nonzero and releases ownership on SQLite startup rejection before database publication", async () => {
   const s = await stateFixture("http://127.0.0.1:1", "http://127.0.0.1:2");
   const artifact = join(s.dir, "start-failure-artifact");
   await mkdir(artifact);
@@ -313,20 +362,13 @@ test("official CLI exits nonzero and releases ownership on provider startup reje
     artifact,
   ]);
   const preload = join(s.dir, "reject-stamp.cjs"),
-    config = join(s.dir, "start-failure.yml");
+    config = join(s.dir, "start-failure.toml");
   await writeFile(
     preload,
     `const {DatabaseSync}=require('node:sqlite');const {writeSync}=require('node:fs');const original=DatabaseSync.prototype.exec;DatabaseSync.prototype.exec=function(sql,...args){if(sql.includes('PRAGMA application_id=1347375956')){writeSync(2,'OWNED_STAMP_REJECTION\\n');throw Error('owned stamping failure')}return original.call(this,sql,...args)};`,
   );
   const fresh = { ...s.config, data_dir: join(s.dir, "start-failure-state") };
-  await writeFile(
-    config,
-    stringify({
-      daemon: { autoRestart: false },
-      plugins: { [join(artifact, "post/dist/post-plugin.cjs")]: fresh },
-    }),
-    { mode: 0o600 },
-  );
+  await writeFile(config, stringify(fresh), { mode: 0o600 });
   const child = processFixture(
     [join(artifact, "dist/cli.cjs"), "serve", "--config", config],
     {
@@ -344,10 +386,7 @@ test("official CLI exits nonzero and releases ownership on provider startup reje
     const result = await Promise.race([
       child.exited,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(Error("provider startup timeout")),
-          5000,
-        );
+        timer = setTimeout(() => reject(Error("SQLite startup timeout")), 5000);
       }),
     ]);
     expect(result.err).toContain("OWNED_STAMP_REJECTION");

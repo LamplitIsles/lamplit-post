@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigSchema } from "../src/config";
 import { Store } from "../src/store";
-test("framework provider vault and key reopen under exclusive owned state", async () => {
+test("native SQLite vault and key reopen under exclusive owned state", async () => {
   const dir = await mkdtemp(join(tmpdir(), "post-framework-"));
-  const config = ConfigSchema({
+  const config = ConfigSchema.parse({
     data_dir: join(dir, "data"),
     master_key_file: join(dir, "keys", "master"),
     accounts: [

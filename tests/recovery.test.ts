@@ -61,26 +61,18 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
     expect(({ n: await count(store.db, "messages") } as any).n).toBe(1);
     expect(({ n: await count(store.db, "deliveries") } as any).n).toBe(2);
     const body = (
-      (
-        await store.db.get(
-          "post_deliveries",
-          { binding: binding.id },
-          { fields: ["body"] },
-        )
-      )[0] as any
+      store.db
+        .prepare("SELECT `body` FROM deliveries WHERE `binding` = ?")
+        .all(binding.id)[0] as any
     ).body;
     const oldUrl = binding.receiver_url;
     binding.receiver_url = second.url;
     await service.dispatch(binding);
     expect(
       (
-        (
-          await store.db.get(
-            "post_deliveries",
-            { binding: binding.id },
-            { fields: ["state"] },
-          )
-        )[0] as any
+        store.db
+          .prepare("SELECT `state` FROM deliveries WHERE `binding` = ?")
+          .all(binding.id)[0] as any
       ).state,
     ).toBe("held");
     expect(second.attempts).toHaveLength(0);
@@ -99,13 +91,11 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
     await store.revoke("cfl");
     await service.dispatch(binding);
     expect(
-      (
-        await store.db.get(
-          "post_deliveries",
-          { binding: binding.id },
-          { fields: ["state", "category"], sort: { seq: "desc" }, limit: 1 },
+      store.db
+        .prepare(
+          "SELECT `state`,`category` FROM deliveries WHERE `binding` = ? ORDER BY `seq` DESC LIMIT ?",
         )
-      )[0] as any,
+        .all(binding.id, 1)[0] as any,
     ).toEqual({ state: "cancelled", category: "agent_revoked" });
   } finally {
     await service?.stop();
@@ -171,17 +161,21 @@ test("actual platform restart stores initial catchup without waking and reopens 
     };
     const result = await r.service.call("cfl", "send_message", args);
     expect(result.status).toBe("sent");
-    await r.store.db.create("post_sends", {
-      agent: "cfl",
-      request: "crash-pending",
-      input: JSON.stringify({
-        account_id: "qq-main",
-        conversation_id: "qq-group",
-        request_id: "crash-pending",
-        content: [{ type: "text", text: "pending" }],
-      }),
-      result: null,
-    });
+    r.store.db
+      .prepare(
+        "INSERT INTO sends (`agent`,`request`,`input`,`result`) VALUES (?,?,?,?) RETURNING *",
+      )
+      .get(
+        "cfl",
+        "crash-pending",
+        JSON.stringify({
+          account_id: "qq-main",
+          conversation_id: "qq-group",
+          request_id: "crash-pending",
+          content: [{ type: "text", text: "pending" }],
+        }),
+        null,
+      );
     await r.stop();
     r = undefined;
     r = await start(s.config, { qqOrigin: p.url, qqGateway: p.gateway });

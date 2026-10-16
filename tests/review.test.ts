@@ -74,13 +74,9 @@ test("QQ private peer admission protects history, assets and send while retainin
     });
     await until(
       async () =>
-        !!(
-          await f.r.store.db.get(
-            "post_messages",
-            { native: "peer-asset" },
-            { fields: ["id"] },
-          )
-        )[0],
+        !!f.r.store.db
+          .prepare("SELECT `id` FROM messages WHERE `native` = ?")
+          .all("peer-asset")[0],
     );
     const inbound = (await f.call("read_messages", dm))
       .structuredContent as any;
@@ -241,21 +237,13 @@ test("expired second QQ reply is failed with no second native submission and sta
     });
     await until(
       async () =>
-        !!(
-          await f.r.store.db.get(
-            "post_messages",
-            { native: "expiring-target" },
-            { fields: ["id"] },
-          )
-        )[0],
+        !!f.r.store.db
+          .prepare("SELECT `id` FROM messages WHERE `native` = ?")
+          .all("expiring-target")[0],
     );
-    const reply = (
-      await f.r.store.db.get(
-        "post_messages",
-        { native: "expiring-target" },
-        { fields: ["id"] },
-      )
-    )[0] as any;
+    const reply = f.r.store.db
+      .prepare("SELECT `id` FROM messages WHERE `native` = ?")
+      .all("expiring-target")[0] as any;
     f.p.holdNextSend(1400);
     const args = {
       ...qq,
@@ -517,13 +505,9 @@ test("actual Matrix SDK suppresses multi-batch startup and reconnect catchup the
     second.release();
     await until(
       async () =>
-        !!(
-          await f.r.store.db.get(
-            "post_messages",
-            { native: "$catchup-2" },
-            { fields: ["id"] },
-          )
-        )[0],
+        !!f.r.store.db
+          .prepare("SELECT `id` FROM messages WHERE `native` = ?")
+          .all("$catchup-2")[0],
     );
     expect(timeline.find((e) => e.id === "$catchup-2")).toMatchObject({
       liveEvent: true,
@@ -542,25 +526,17 @@ test("actual Matrix SDK suppresses multi-batch startup and reconnect catchup the
     reconnected.release();
     await until(
       async () =>
-        !!(
-          await f.r.store.db.get(
-            "post_messages",
-            { native: "$catchup-5" },
-            { fields: ["id"] },
-          )
-        )[0],
+        !!f.r.store.db
+          .prepare("SELECT `id` FROM messages WHERE `native` = ?")
+          .all("$catchup-5")[0],
       8000,
     );
     lastCatchup.release();
     await until(
       async () =>
-        !!(
-          await f.r.store.db.get(
-            "post_messages",
-            { native: "$catchup-6" },
-            { fields: ["id"] },
-          )
-        )[0],
+        !!f.r.store.db
+          .prepare("SELECT `id` FROM messages WHERE `native` = ?")
+          .all("$catchup-6")[0],
     );
     expect({ n: await count(f.r.store.db, "deliveries") }).toEqual({ n: 1 });
     expect(f.receiver.attempts).toHaveLength(1);

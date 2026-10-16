@@ -1,3 +1,4 @@
+import type { Tables } from "./models";
 import { open, rename, unlink, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileTypeFromBuffer } from "file-type";
@@ -11,7 +12,13 @@ export class Assets {
     return join(this.store.config.data_dir, "assets", storage);
   }
   async row(id: string) {
-    return (await this.store.db.get("post_assets", { id }))[0] ?? null;
+    return (
+      (
+        this.store.db
+          .prepare("SELECT * FROM assets WHERE `id` = ?")
+          .all(id) as unknown as Tables["assets"][]
+      )[0] ?? null
+    );
   }
   async metadata(id: string): Promise<AssetV1> {
     const r = await this.row(id);
@@ -94,12 +101,16 @@ export class Assets {
         download_path: "/assets/" + id,
       };
       try {
-        await this.store.db.create("post_assets", {
-          id,
-          owner,
-          metadata: JSON.stringify(meta),
-          storage: id,
-        });
+        this.store.db
+          .prepare(
+            "INSERT INTO assets (`id`,`owner`,`metadata`,`storage`) VALUES (?,?,?,?) RETURNING *",
+          )
+          .get(
+            id,
+            owner,
+            JSON.stringify(meta),
+            id,
+          ) as unknown as Tables["assets"];
       } catch (e) {
         await unlink(this.path(id));
         throw e;
@@ -125,12 +136,11 @@ export class Assets {
       download_path: null,
       reason,
     };
-    await this.store.db.create("post_assets", {
-      id,
-      owner: null,
-      metadata: JSON.stringify(meta),
-      storage: null,
-    });
+    this.store.db
+      .prepare(
+        "INSERT INTO assets (`id`,`owner`,`metadata`,`storage`) VALUES (?,?,?,?) RETURNING *",
+      )
+      .get(id, null, JSON.stringify(meta), null) as unknown as Tables["assets"];
     return meta;
   }
   async bytes(id: string, signal?: AbortSignal) {

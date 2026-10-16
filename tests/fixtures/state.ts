@@ -11,7 +11,7 @@ export async function stateFixture(
   const dir = await mkdtemp(join(tmpdir(), "post-state-"));
   const key = join(dir, "master.key");
   await writeFile(key, Buffer.alloc(32, 7), { mode: 0o600 });
-  const config = ConfigSchema({
+  const config = ConfigSchema.parse({
     data_dir: join(dir, "data"),
     master_key_file: key,
     port: 0,
@@ -113,5 +113,21 @@ export async function until(
 export async function count(db: any, table: string) {
   if (table === "inbox")
     return db.prepare("SELECT count(*) n FROM inbox").get().n as number;
-  return (await db.get("post_" + table, {})).length as number;
+  if (
+    ![
+      "vault",
+      "tokens",
+      "identities",
+      "conversations",
+      "messages",
+      "assets",
+      "message_assets",
+      "deliveries",
+      "sends",
+      "reply_sequences",
+      "gaps",
+    ].includes(table)
+  )
+    throw new Error("Unknown fixture table");
+  return db.prepare("SELECT count(*) n FROM " + table).get().n as number;
 }

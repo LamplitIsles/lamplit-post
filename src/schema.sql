@@ -1,0 +1,14 @@
+CREATE TABLE IF NOT EXISTS meta(version INTEGER NOT NULL); INSERT INTO meta SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM meta);
+   CREATE TABLE IF NOT EXISTS vault(ref TEXT PRIMARY KEY,account TEXT,kind TEXT,key_id TEXT,nonce BLOB,tag BLOB,cipher BLOB);
+   CREATE TABLE IF NOT EXISTS tokens(agent TEXT PRIMARY KEY,digest TEXT UNIQUE NOT NULL);
+   CREATE TABLE IF NOT EXISTS identities(account TEXT PRIMARY KEY,platform TEXT,native TEXT);
+   CREATE TABLE IF NOT EXISTS conversations(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,account TEXT,native TEXT,type TEXT,name TEXT,UNIQUE(account,native,type));
+   CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,account TEXT,conversation TEXT,native TEXT,sender TEXT,body TEXT,UNIQUE(account,conversation,native));
+   CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,owner TEXT,metadata TEXT NOT NULL,storage TEXT);
+   CREATE TABLE IF NOT EXISTS message_assets(asset TEXT,message TEXT,PRIMARY KEY(asset,message));
+   CREATE INDEX IF NOT EXISTS message_scope ON messages(account,conversation,seq);
+   CREATE TABLE IF NOT EXISTS deliveries(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,binding TEXT,agent TEXT,message TEXT,receiver TEXT,body TEXT,state TEXT DEFAULT 'pending',attempt INTEGER DEFAULT 0,due INTEGER DEFAULT 0,category TEXT);
+   CREATE INDEX IF NOT EXISTS delivery_work ON deliveries(binding,state,seq);
+   CREATE TABLE IF NOT EXISTS sends(agent TEXT,request TEXT,input TEXT,result TEXT,PRIMARY KEY(agent,request));
+   CREATE TABLE IF NOT EXISTS reply_sequences(account TEXT, native TEXT, sequence INTEGER, PRIMARY KEY(account,native));
+   CREATE TABLE IF NOT EXISTS gaps(seq INTEGER PRIMARY KEY AUTOINCREMENT,account TEXT,category TEXT,at INTEGER);
