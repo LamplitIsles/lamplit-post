@@ -1,0 +1,148 @@
+import { z } from "zod";
+import { parse } from "@iarna/toml";
+import { readFile, stat } from "node:fs/promises";
+import { resolve, dirname } from "node:path";
+const id = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
+const ref = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
+const url = z
+  .string()
+  .url()
+  .refine((s) => {
+    const u = new URL(s);
+    return (
+      ["http:", "https:"].includes(u.protocol) &&
+      !u.username &&
+      !u.password &&
+      !u.hash &&
+      !u.search
+    );
+  });
+const scope = z
+  .object({
+    account_id: id,
+    conversation_id: id,
+    native_id: z.string().min(1).max(256),
+    type: z.enum(["direct", "group"]),
+    senders: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+export const ConfigSchema = z
+  .object({
+    data_dir: z.string().min(1),
+    master_key_file: z.string().min(1),
+    hostname: z.literal("127.0.0.1").default("127.0.0.1"),
+    port: z.number().int().min(0).max(65535).default(8787),
+    max_asset_bytes: z
+      .number()
+      .int()
+      .positive()
+      .max(64 * 1024 * 1024)
+      .default(16 * 1024 * 1024),
+    timeout_ms: z.number().int().min(50).max(120000).default(30000),
+    backlog_limit: z.number().int().positive().default(10000),
+    accounts: z
+      .array(
+        z
+          .object({
+            id,
+            platform: z.enum(["qq", "matrix"]),
+            credential: ref,
+            native_id: z.string().min(1),
+            homeserver: url.optional(),
+          })
+          .strict()
+          .superRefine((v, c) => {
+            if (v.platform === "matrix" && !v.homeserver)
+              c.addIssue({
+                code: "custom",
+                message: "Matrix homeserver required",
+              });
+          }),
+      )
+      .min(1),
+    bindings: z
+      .array(
+        z
+          .object({
+            id,
+            agent_id: id,
+            receiver_url: url,
+            receiver_credential: ref,
+            scopes: z.array(scope).min(1),
+            wake: z
+              .object({
+                direct: z.boolean().default(false),
+                mention: z.boolean().default(true),
+                reply: z.boolean().default(true),
+                aliases: z.array(z.string().min(1).max(128)).default([]),
+              })
+              .strict(),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict()
+  .superRefine((v, c) => {
+    for (const items of [v.accounts, v.bindings])
+      if (new Set(items.map((x) => x.id)).size !== items.length)
+        c.addIssue({ code: "custom", message: "Duplicate ID" });
+    const refs = [
+      ...v.accounts.map((a) => a.credential),
+      ...v.bindings.map((b) => b.receiver_credential),
+    ];
+    if (new Set(refs).size !== refs.length)
+      c.addIssue({ code: "custom", message: "Credential refs must be unique" });
+    const conv = new Map<string, string>();
+    const native = new Map<string, string>();
+    const ids = new Map<string, string>();
+    for (const b of v.bindings)
+      for (const s of b.scopes) {
+        if (!v.accounts.some((a) => a.id === s.account_id))
+          c.addIssue({ code: "custom", message: "Unknown account" });
+        const key = s.account_id + ":" + s.conversation_id;
+        const val = JSON.stringify([s.native_id, s.type]);
+        if (conv.has(key) && conv.get(key) !== val)
+          c.addIssue({ code: "custom", message: "Conflicting conversation" });
+        const nativeKey = JSON.stringify([s.account_id, s.native_id, s.type]);
+        if (
+          native.has(nativeKey) &&
+          native.get(nativeKey) !== s.conversation_id
+        )
+          c.addIssue({
+            code: "custom",
+            message: "Native conversation has conflicting Post IDs",
+          });
+        if (
+          ids.has(s.conversation_id) &&
+          ids.get(s.conversation_id) !== s.account_id
+        )
+          c.addIssue({
+            code: "custom",
+            message: "Conversation IDs must be globally unique",
+          });
+        native.set(nativeKey, s.conversation_id);
+        ids.set(s.conversation_id, s.account_id);
+        conv.set(key, val);
+      }
+  });
+export type Config = z.infer<typeof ConfigSchema>;
+export type Binding = Config["bindings"][number];
+export type Scope = Binding["scopes"][number];
+export type AccountConfig = Config["accounts"][number];
+export async function loadConfig(path: string) {
+  const permissions = await stat(path);
+  if (!permissions.isFile() || permissions.mode & 0o022)
+    throw new Error("Config must not be writable by group/others");
+  const cfg = ConfigSchema.parse(parse(await readFile(path, "utf8")));
+  cfg.data_dir = resolve(dirname(path), cfg.data_dir);
+  cfg.master_key_file = resolve(dirname(path), cfg.master_key_file);
+  if (cfg.master_key_file.startsWith(cfg.data_dir + "/"))
+    throw new Error("Master key must be outside data directory");
+  return cfg;
+}
+export async function privateFile(path: string) {
+  const s = await stat(path);
+  if (!s.isFile() || s.mode & 0o077)
+    throw new Error("Private file permissions required");
+}

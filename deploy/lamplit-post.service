@@ -1,0 +1,24 @@
+# Template only. Replace executable/config paths and User before installing.
+[Unit]
+Description=Lamplit Post private IM backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=REPLACE_WITH_SERVICE_USER
+ExecStart=/opt/lamplit-post/bun /opt/lamplit-post/cli.js serve --config /etc/lamplit-post/post.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=150s
+TimeoutStopSec=40s
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lamplit-post /etc/lamplit-post/keys
+
+[Install]
+WantedBy=multi-user.target
