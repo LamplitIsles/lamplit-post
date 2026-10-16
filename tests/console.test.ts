@@ -129,7 +129,11 @@ test("canonical extracted preview validates without state, serves native shell/a
       join(root, "examples/koishi.preview.yml"),
       "utf8",
     );
-    const document = parse(template.replaceAll("__POST_ARTIFACT_ROOT__", root));
+    const marker = "__POST_ARTIFACT_ROOT__";
+    expect(template.split(marker).length - 1).toBe(4);
+    const materialized = template.replaceAll(marker, root);
+    expect(materialized).not.toContain(marker);
+    const document = parse(materialized);
     const keys = Object.keys(document.plugins),
       post = keys.find((k) => k.endsWith("post-plugin.cjs"))!,
       server = keys.find((k) => k.endsWith("plugin-server/index.cjs"))!;

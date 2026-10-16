@@ -1,6 +1,6 @@
 # Native Koishi appearance preview ONLY: VPN entry, no human authentication.
 # Keep accounts/bindings empty. No credentials, tokens, messages or write plugins.
-# Replace __POST_ARTIFACT_ROOT__ once with the immutable absolute artifact root
+# Replace the four artifact-root markers with the immutable absolute artifact root
 # under HOME. Reject colons, apostrophes, interpolation and control characters.
 # Package entries are absolute so config-directory packages cannot shadow them.
 daemon:
