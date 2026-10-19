@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" role="img" aria-labelledby="post-title">
+  <title id="post-title">Lamplit Post</title>
+  <g stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 8H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h20a2 2 0 0 0 2-2V13"/>
+    <path d="m5 10 9.8 7.4a2 2 0 0 0 2.4 0L23 13"/>
+  </g>
+  <circle cx="27" cy="6" r="3" fill="currentColor"/>
+</svg>
