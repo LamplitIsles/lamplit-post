@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import { Checkbox } from "$lib/components/ui/checkbox/index.js";
@@ -15,6 +15,69 @@
     agent = $state(""),
     notice = $state(""),
     error = $state("");
+  let applying = $state(false);
+  let draftSavedVersion = $state("");
+  let verifying = $state(false),
+    verified = $state(false),
+    verificationKey = $state("");
+  let verifyController,
+    verificationGeneration = 0;
+  let qqDraft = $state(null),
+    qqBusy = $state(false),
+    manualQQ = $state(false);
+  let qqController,
+    qqGeneration = 0;
+  let receiverRequired = $state(false),
+    connectionDetails = $state(false);
+  const draftKey = () =>
+    JSON.stringify([
+      selected?.id,
+      selected?.platform,
+      selected?.native_id,
+      selected?.homeserver,
+      platformSecret,
+    ]);
+  $effect(() => {
+    const key = draftKey();
+    if (verificationKey && verificationKey !== key) {
+      invalidateVerification();
+      if (draft) draft.scopes = [];
+    }
+    if (selected?.platform !== "qq" && qqDraft) void clearQQ();
+    if (!logged) {
+      pollController?.abort();
+      applying = false;
+    }
+  });
+  const missing = $derived.by(() => {
+    if (!draft) return [];
+    const reasons = [];
+    if (!selected) reasons.push("请选择或新建 IM 账号");
+    else {
+      if (!selected.native_id)
+        reasons.push(
+          selected.platform === "matrix"
+            ? "填写 Matrix 用户 ID"
+            : "先扫码授权，或在高级选项中填写 App ID",
+        );
+      if (selected.platform === "matrix") {
+        if (!selected.homeserver) reasons.push("填写 Homeserver 地址");
+        if (newAccount && !platformSecret) reasons.push("填写 Access token");
+        if ((newAccount || platformSecret) && !verified)
+          reasons.push("验证账号并读取房间");
+      } else if (
+        newAccount &&
+        !platformSecret &&
+        qqDraft?.state !== "authorized"
+      )
+        reasons.push("完成 QQ 扫码授权，或填写 AppSecret");
+    }
+    if (!draft.receiver_url) reasons.push("填写消费者接收地址");
+    if (receiverRequired && !receiverSecret)
+      reasons.push("填写此绑定的接收密钥");
+    return reasons;
+  });
+  let pollController;
   let open = $state(false),
     draft = $state(null),
     selected = $state(null),
@@ -46,6 +109,7 @@
   const copy = (o) => JSON.parse(JSON.stringify(o));
   const cleanAccount = (a) => {
     const { hasCredential, ready, ...rest } = a;
+    if (rest.name === "") delete rest.name;
     return rest;
   };
   const cleanBinding = (b) => {
@@ -69,29 +133,53 @@
     ]
       .filter(Boolean)
       .join("、") || "不自动唤醒";
-  const explain = (code) =>
+  const explain = (code, path) =>
     code === "conflict"
-      ? "设置已被修改或身份已固定。请刷新后重试；已使用的账号和聊天 ID 不能更换。"
+      ? path === "matrix/verify"
+        ? "账号身份不匹配，或已使用的身份不能更换。请检查用户 ID 和凭据。"
+        : "设置已被修改或身份已固定。请刷新后重试；已使用的账号和聊天 ID 不能更换。"
       : code === "unavailable"
         ? "连接暂时不可用。请检查账号凭据和地址后重试。"
         : code === "unauthorized"
-          ? "登录已过期，请重新登录。"
-          : "内容未通过检查，请核对 ID、地址和必填项后重试。";
-  async function api(path, input) {
+          ? path === "login"
+            ? "登录未成功，请检查密码或稍后重试。"
+            : "登录已过期，请重新登录。"
+          : path === "matrix/verify"
+            ? "验证未成功，请检查用户 ID、Homeserver 和 Access token 后重试。"
+            : "内容未通过检查，请核对 ID、地址和必填项后重试。";
+  async function api(path, input, options = {}) {
     const response = await fetch("/api/" + path, {
+      ...options,
       method: input === undefined ? "GET" : "POST",
       headers:
         input === undefined
           ? {}
           : { "Content-Type": "application/json", "X-Post-CSRF": csrf },
       ...(input === undefined ? {} : { body: JSON.stringify(input) }),
-    }).catch(() => {
+    }).catch((e) => {
+      if (options.signal?.aborted) throw e;
       throw new Error("连接中断。请先重新读取设置，确认是否已保存，再重试。");
     });
-    const data = await response.json();
+    if (response.status === 401 && path !== "login") logged = false;
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error(
+        `响应不完整（HTTP ${response.status}）。请重新读取设置，确认是否已保存；不要重复提交。`,
+      );
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data))
+      throw new Error(
+        `响应不完整（HTTP ${response.status}）。请重新读取设置，确认是否已保存；不要重复提交。`,
+      );
     if (!response.ok) {
+      if (data.busy)
+        throw new Error(
+          "连接仍在处理，请等待状态更新后重试。此次未接受新设置。",
+        );
       if (response.status === 401 && path !== "login") logged = false;
-      throw new Error(explain(data.error));
+      throw new Error(explain(data.error, path));
     }
     return data;
   }
@@ -109,6 +197,8 @@
   }
   async function refresh() {
     state = await api("settings");
+    applying = state.busy;
+    if (applying && !pollController) void followApply();
     if (!agents.some(([id]) => id === agent))
       agent = state.bindings[0]?.agent_id || "";
   }
@@ -121,35 +211,130 @@
       await refresh();
     });
   }
-  onMount(async () => {
+  async function followApply() {
+    const controller = new AbortController();
+    pollController = controller;
     try {
-      const s = await api("session");
-      csrf = s.csrf;
-      logged = true;
-      await refresh();
+      while (logged && !controller.signal.aborted) {
+        const status = await api("status", undefined, {
+          signal: controller.signal,
+        });
+        state = { ...state, ...status };
+        applying = status.busy;
+        if (!status.busy) {
+          await refresh();
+          await finishDraft(status);
+          notice = status.applied
+            ? "设置已生效"
+            : status.state === "failed_recovered"
+              ? "新设置未生效，已恢复原设置。"
+              : "连接未就绪，请检查账号后重试。";
+          break;
+        }
+        notice =
+          status.state === "failed_draining"
+            ? "连接停止超时，正在清理。请勿重复提交。"
+            : status.state === "recovering"
+              ? "连接未成功，正在恢复原设置…"
+              : !status.saved
+                ? "尚未保存，正在停止旧连接…"
+                : "已保存，正在连接…";
+        await new Promise((resolve) => {
+          const t = setTimeout(done, 250);
+          function done() {
+            clearTimeout(t);
+            controller.signal.removeEventListener("abort", done);
+            resolve();
+          }
+          controller.signal.addEventListener("abort", done, { once: true });
+        });
+      }
     } catch (e) {
-      if (logged) error = e.message || "无法读取设置，请重试。";
+      if (!controller.signal.aborted) error = e.message;
     } finally {
-      loading = false;
+      if (pollController === controller) pollController = null;
     }
+  }
+  onMount(() => {
+    void (async () => {
+      try {
+        const s = await api("session");
+        csrf = s.csrf;
+        logged = true;
+        await refresh();
+      } catch (e) {
+        if (logged) error = e.message || "无法读取设置，请重试。";
+      } finally {
+        loading = false;
+      }
+    })();
+    return () => {
+      pollController?.abort();
+      invalidateVerification();
+      void clearQQ();
+    };
   });
-  async function save(accounts, bindings, secrets = []) {
-    const result = await api("settings", {
-      version: state.version,
-      accounts: accounts.map(cleanAccount),
-      bindings: bindings.map(cleanBinding),
-      secrets,
-    });
+  async function finishDraft(status) {
+    if (!draftSavedVersion) return;
+    if (status.accepted_version === draftSavedVersion && status.applied) {
+      if (qqDraft) qqDraft = { ...qqDraft, state: "committed" };
+      dismiss();
+    } else {
+      draftSavedVersion = "";
+      if (qqDraft?.id) {
+        const failedDraft = draft,
+          authorization = qqDraft;
+        let current;
+        try {
+          current = await api(
+            "connect/qq?id=" + encodeURIComponent(authorization.id),
+          );
+        } catch {
+          current = null;
+        }
+        if (draft !== failedDraft || qqDraft !== authorization) return;
+        qqDraft = current;
+      }
+      invalidateVerification();
+      step = 0;
+      error =
+        "连接未成功，新设置未生效。已保留账号和聊天草稿，请检查连接后重试。";
+    }
+  }
+  async function save(accounts, bindings, secrets = [], authorization) {
+    let result;
+    try {
+      result = await api("settings", {
+        version: state.version,
+        accounts: accounts.map(cleanAccount),
+        bindings: bindings.map(cleanBinding),
+        secrets,
+        ...(authorization ? { qq_authorization: authorization } : {}),
+      });
+    } catch (e) {
+      try {
+        await refresh();
+      } catch {}
+      throw e;
+    }
     await refresh();
-    if (!result.applied)
-      throw new Error(
-        result.state === "failed_recovered"
-          ? "新设置未生效，已恢复原设置。请检查连接后重试。"
-          : "保存或恢复失败。服务未就绪，请检查配置后重试。",
-      );
-    notice = "已保存并生效";
+    if (!result.saved)
+      throw new Error("尚未保存：旧连接仍在停止或恢复。请等待状态更新后再试。");
+    notice = state.applied
+      ? "设置已生效"
+      : state.busy
+        ? "已保存，正在连接…"
+        : state.state === "failed_recovered"
+          ? "新设置未生效，已恢复原设置。"
+          : "连接未就绪，请检查账号后重试。";
+    return result;
   }
   function begin(binding) {
+    draftSavedVersion = "";
+    invalidateVerification();
+    void clearQQ();
+    manualQQ = false;
+    receiverRequired = !binding?.hasCredential;
     draft = binding
       ? copy(cleanBinding(binding))
       : {
@@ -169,6 +354,7 @@
           ),
         )
       : null;
+    connectionDetails = !draft.receiver_url || receiverRequired;
     step = 0;
     newAccount = false;
     platformSecret = "";
@@ -180,6 +366,8 @@
     open = true;
   }
   function choose(a) {
+    invalidateVerification();
+    void clearQQ();
     if (selected?.id !== a.id) {
       draft.scopes = [];
       platformSecret = "";
@@ -190,6 +378,9 @@
     discovery = "";
   }
   function addAccount() {
+    invalidateVerification();
+    void clearQQ();
+    manualQQ = false;
     draft.scopes = [];
     selected = {
       id: uid("account"),
@@ -201,14 +392,146 @@
     newAccount = true;
     platformSecret = "";
   }
-  async function discover() {
-    await run(async () => {
-      const result = await api("discover", { account_id: selected.id });
+  function invalidateVerification() {
+    verificationGeneration++;
+    verifyController?.abort();
+    verifyController = null;
+    verifying = false;
+    verified = false;
+    verificationKey = "";
+    candidates = [];
+    discovery = "";
+  }
+  function normalizeDraftId(id, items = []) {
+    const previous = selected.id;
+    selected = { ...selected, id };
+    draft.scopes = draft.scopes.map((scope) => {
+      if (scope.account_id !== previous) return scope;
+      const pin = items.find(
+        (item) =>
+          item.native_id === scope.native_id && item.type === scope.type,
+      );
+      return {
+        ...scope,
+        account_id: id,
+        ...(pin ? { conversation_id: pin.conversation_id } : {}),
+      };
+    });
+  }
+  async function verifyDraft() {
+    invalidateVerification();
+    const generation = verificationGeneration,
+      controller = new AbortController();
+    verifyController = controller;
+    verificationKey = draftKey();
+    verifying = true;
+    error = "";
+    try {
+      const result = await api(
+        "matrix/verify",
+        {
+          account: cleanAccount(selected),
+          ...(platformSecret ? { credential: platformSecret } : {}),
+        },
+        { signal: controller.signal },
+      );
+      if (generation !== verificationGeneration || controller.signal.aborted)
+        return;
+      normalizeDraftId(result.account.id, result.items);
+      verificationKey = draftKey();
       candidates = result.items;
-      discovery =
-        result.source === "local"
-          ? "QQ 仅显示本机已观测或手动配置的聊天，不是完整目录。"
-          : "Matrix 当前加入的房间；加密房间暂不支持。";
+      verified = true;
+      discovery = candidates.length
+        ? "账号已验证。请选择房间；加密房间暂不支持。"
+        : "账号已验证，目前没有已加入的房间。";
+    } catch (e) {
+      if (!controller.signal.aborted) error = e.message;
+    } finally {
+      if (generation === verificationGeneration) verifying = false;
+    }
+  }
+  async function clearQQ() {
+    qqGeneration++;
+    qqController?.abort();
+    qqController = null;
+    const previous = qqDraft;
+    qqDraft = null;
+    qqBusy = false;
+    if (previous?.id && previous.state !== "committed") {
+      try {
+        await api("connect/qq", { action: "cancel", id: previous.id });
+      } catch {}
+    }
+  }
+  async function scanQQ() {
+    await clearQQ();
+    const generation = qqGeneration,
+      controller = new AbortController();
+    qqController = controller;
+    qqBusy = true;
+    manualQQ = false;
+    platformSecret = "";
+    error = "";
+    try {
+      const started = await api("connect/qq", {
+        action: "start",
+        account_id: selected.id,
+      });
+      if (generation !== qqGeneration || controller.signal.aborted) {
+        await api("connect/qq", { action: "cancel", id: started.id });
+        return;
+      }
+      qqDraft = started;
+      while (!controller.signal.aborted && generation === qqGeneration) {
+        const result = await api(
+          "connect/qq?id=" + encodeURIComponent(started.id),
+          undefined,
+          { signal: controller.signal },
+        );
+        if (generation !== qqGeneration || controller.signal.aborted) return;
+        qqDraft = result;
+        if (result.state === "authorized") {
+          selected.native_id = result.native_id;
+          const local = await api(
+            "discover",
+            { account_id: result.account_id, qq_authorization: result.id },
+            { signal: controller.signal },
+          );
+          if (generation !== qqGeneration || controller.signal.aborted) return;
+          normalizeDraftId(result.account_id, local.items);
+          candidates = local.items;
+          break;
+        }
+        if (result.state === "conflict")
+          throw new Error(explain("conflict", "connect/qq"));
+        if (["expired", "failed", "cancelled"].includes(result.state)) break;
+        await new Promise((resolve) => {
+          const timer = setTimeout(done, 250);
+          function done() {
+            clearTimeout(timer);
+            controller.signal.removeEventListener("abort", done);
+            resolve();
+          }
+          controller.signal.addEventListener("abort", done, { once: true });
+        });
+      }
+    } catch (e) {
+      if (!controller.signal.aborted) error = e.message;
+    } finally {
+      if (generation === qqGeneration) qqBusy = false;
+    }
+  }
+  async function discover() {
+    if (selected.platform === "matrix") return verifyDraft();
+    await run(async () => {
+      const result = await api("discover", {
+        account_id: selected.id,
+        ...(qqDraft?.state === "authorized"
+          ? { qq_authorization: qqDraft.id }
+          : {}),
+      });
+      candidates = result.items;
+      discovery = "QQ 仅显示本机已观测或手动配置的聊天，不是完整目录。";
     });
   }
   function toggle(c, checked) {
@@ -225,14 +548,21 @@
   }
   function manualAdd() {
     if (!manual.trim()) return;
-    const existing = state.bindings
-      .flatMap((b) => b.scopes)
-      .find(
-        (s) =>
-          s.account_id === selected.id &&
-          s.native_id === manual.trim() &&
-          s.type === (direct ? "direct" : "group"),
-      );
+    const existing = [
+      ...state.bindings.flatMap((b) => b.scopes),
+      ...candidates.map((c) => ({
+        account_id: selected.id,
+        conversation_id: c.conversation_id,
+        native_id: c.native_id,
+        type: c.type,
+        senders: [],
+      })),
+    ].find(
+      (s) =>
+        s.account_id === selected.id &&
+        s.native_id === manual.trim() &&
+        s.type === (direct ? "direct" : "group"),
+    );
     const c = existing
       ? copy(existing)
       : {
@@ -283,13 +613,22 @@
           kind: "receiver",
           value: receiverSecret,
         });
-      await save(accounts, updated, secrets);
-      platformSecret = "";
-      receiverSecret = "";
-      open = false;
+      const result = await save(
+        accounts,
+        updated,
+        secrets,
+        qqDraft?.state === "authorized"
+          ? { id: qqDraft.id, account_id: selected.id }
+          : undefined,
+      );
+      draftSavedVersion = result.accepted_version;
+      if (!state.busy) await finishDraft(state);
     });
   }
   function dismiss() {
+    draftSavedVersion = "";
+    invalidateVerification();
+    void clearQQ();
     open = false;
     platformSecret = "";
     receiverSecret = "";
@@ -461,7 +800,7 @@
           </div>
           <Button
             id="bind"
-            disabled={busy}
+            disabled={busy || applying}
             onclick={() => begin(bindings.find((b) => !b.scopes.length))}
             >＋ 绑定账号</Button
           >
@@ -544,12 +883,12 @@
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={busy}
+                  disabled={busy || applying}
                   onclick={() => begin(b)}>编辑绑定</Button
                 ><Button
                   variant="ghost"
                   size="sm"
-                  disabled={busy}
+                  disabled={busy || applying}
                   onclick={() =>
                     run(() =>
                       save(
@@ -595,11 +934,11 @@
           <div class="actions">
             <Button
               variant="outline"
-              disabled={busy}
+              disabled={busy || applying}
               onclick={() => token("issue")}>签发 / 替换 Agent token</Button
             ><Button
               variant="ghost"
-              disabled={busy}
+              disabled={busy || applying}
               onclick={() => token("revoke")}>撤销 token</Button
             >
           </div>
@@ -623,6 +962,9 @@
   bind:open
   onOpenChange={(value) => {
     if (!value) {
+      draftSavedVersion = "";
+      invalidateVerification();
+      void clearQQ();
       platformSecret = "";
       receiverSecret = "";
     }
@@ -634,7 +976,9 @@
           step
         ]}</Dialog.Title
       ><Dialog.Description
-        >为 {agent} 设置 · 取消不会修改已保存规则</Dialog.Description
+        >{draftSavedVersion
+          ? "设置已保存，正在连接。关闭不会撤销此次保存。"
+          : `为 ${agent} 设置 · 取消不会修改已保存规则`}</Dialog.Description
       ></Dialog.Header
     >
     <ol class="stepper" aria-label="绑定步骤">
@@ -673,42 +1017,119 @@
                 <label for="platform">平台</label><select
                   id="platform"
                   bind:value={selected.platform}
+                  onchange={() => {
+                    selected.native_id = "";
+                    delete selected.homeserver;
+                    platformSecret = "";
+                    draft.scopes = [];
+                    invalidateVerification();
+                    void clearQQ();
+                  }}
                   ><option value="qq">QQ 官方机器人</option><option
                     value="matrix">Matrix</option
                   ></select
                 >
               </div>
-              <div class="field">
-                <label for="native"
-                  >{selected.platform === "qq"
-                    ? "App ID"
-                    : "Matrix 用户 ID"}</label
-                ><Input id="native" bind:value={selected.native_id} />
-              </div>
-              {#if selected.platform === "matrix"}<div class="field">
-                  <label for="homeserver">Homeserver 地址</label><Input
-                    id="homeserver"
-                    type="url"
-                    bind:value={selected.homeserver}
-                  />
-                </div>{/if}{:else}<small
+              {#if selected.platform === "qq"}
+                <section class="connect-panel" aria-label="QQ 扫码授权">
+                  <p>
+                    使用手机 QQ 扫码授权机器人。凭据只在 Post
+                    保存；聊天授权将在最后确认。
+                  </p>
+                  {#if qqDraft?.image}<img
+                      class="qr"
+                      src={qqDraft.image}
+                      width="280"
+                      height="280"
+                      alt="QQ 账号授权二维码"
+                    />{/if}
+                  <p role="status">
+                    {qqDraft?.state === "authorized"
+                      ? `已授权机器人 ${qqDraft.native_id}`
+                      : qqDraft?.state === "expired"
+                        ? "授权已过期，请重新扫码。"
+                        : qqDraft?.state === "failed"
+                          ? "授权未成功，请重试。"
+                          : qqBusy
+                            ? "等待扫码授权…"
+                            : "扫码后获取机器人连接信息。"}
+                  </p>
+                  <div class="actions">
+                    <Button
+                      type="button"
+                      disabled={qqBusy || busy || applying}
+                      onclick={scanQQ}
+                      >{qqDraft ? "重新扫码" : "扫码连接 QQ"}</Button
+                    >
+                    {#if qqBusy}<Button
+                        variant="outline"
+                        onclick={() => clearQQ()}>取消扫码</Button
+                      >{/if}
+                  </div>
+                  <Button
+                    variant="ghost"
+                    onclick={() => {
+                      void clearQQ();
+                      manualQQ = !manualQQ;
+                    }}>手动输入 App ID / AppSecret（高级）</Button
+                  >
+                </section>
+              {/if}
+              {#if selected.platform === "matrix" || manualQQ}
+                <div class="field">
+                  <label for="native"
+                    >{selected.platform === "qq"
+                      ? "App ID"
+                      : "Matrix 用户 ID"}</label
+                  ><Input id="native" bind:value={selected.native_id} />
+                </div>
+                {#if selected.platform === "matrix"}<div class="field">
+                    <label for="homeserver">Homeserver 地址</label><Input
+                      id="homeserver"
+                      type="url"
+                      bind:value={selected.homeserver}
+                    />
+                  </div>{/if}{/if}{:else}<small
                 >已使用的账号身份不能修改。凭据替换会重新连接共享此账号的绑定。</small
               >{/if}
-            <div class="field">
-              <label for="credential"
-                >{selected.platform === "qq"
-                  ? "AppSecret"
-                  : "Access token"}{newAccount
-                  ? ""
-                  : "（留空保留现有凭据）"}</label
-              ><Input
-                id="credential"
-                type="password"
-                autocomplete="new-password"
-                bind:value={platformSecret}
-              />
-            </div>{/if}
-          <details>
+            {#if selected.platform === "matrix" || !newAccount || manualQQ}<div
+                class="field"
+              >
+                <label for="credential"
+                  >{selected.platform === "qq"
+                    ? "AppSecret"
+                    : "Access token"}{newAccount
+                    ? ""
+                    : "（留空保留现有凭据）"}</label
+                ><Input
+                  id="credential"
+                  type="password"
+                  autocomplete="new-password"
+                  bind:value={platformSecret}
+                />
+              </div>{/if}
+            {#if selected.platform === "matrix"}<div class="connect-panel">
+                <Button
+                  type="button"
+                  disabled={verifying ||
+                    busy ||
+                    applying ||
+                    !selected.native_id ||
+                    !selected.homeserver ||
+                    (newAccount && !platformSecret)}
+                  onclick={verifyDraft}
+                  >{verifying ? "正在验证…" : "验证并读取房间"}</Button
+                >
+                <p role="status">
+                  {verified
+                    ? discovery
+                    : verifying
+                      ? "正在检查账号和房间…"
+                      : "先验证账号，再选择可访问的房间。"}
+                </p>
+              </div>{/if}
+          {/if}
+          <details bind:open={connectionDetails}>
             <summary>此绑定的消费者连接</summary>
             <div class="field">
               <label for="receiver">接收地址</label><Input
@@ -732,13 +1153,17 @@
           <div class="actions">
             <Button
               variant="outline"
-              disabled={busy || newAccount}
+              disabled={busy ||
+                verifying ||
+                (newAccount &&
+                  selected.platform === "qq" &&
+                  qqDraft?.state !== "authorized")}
               onclick={discover}>读取可用聊天 / 重试</Button
             >
           </div>
           <small
-            >{newAccount
-              ? "新账号保存并连接后才能读取平台房间；现在可以手动填写原生 ID。"
+            >{newAccount && selected.platform === "qq"
+              ? "QQ 暂无完整聊天目录，可以填写此 App 的原生 ID。"
               : discovery ||
                 "候选来自平台返回、本机已观测或手动配置，不会自动授权。"}</small
           >
@@ -852,31 +1277,55 @@
               })}
             </dd>
             <dt>生效方式</dt>
-            <dd>保存后等待连接重新就绪。失败时尝试恢复原设置。</dd>
+            <dd>先保存，再显示连接结果。连接失败时尝试恢复原设置。</dd>
           </dl>
           <p class="callout">
             共享账号的其他 agent 保留各自授权。绑定不会授予未选聊天的访问权。
           </p>{/if}
         {#if error}<p role="alert">{error}</p>{/if}
       </div>
+      {#if missing.length}<p id="next-reason" class="hint" role="status">
+          还需：{missing.join("；")}。
+          {#if !draft.receiver_url || (receiverRequired && !receiverSecret)}<button
+              class="text-link"
+              onclick={async () => {
+                const details = document
+                  .querySelector("#receiver")
+                  ?.closest("details");
+                if (details) details.open = true;
+                connectionDetails = true;
+                await tick();
+                document
+                  .querySelector(
+                    !draft.receiver_url ? "#receiver" : "#receiver-secret",
+                  )
+                  ?.focus();
+              }}>填写消费者连接</button
+            >{/if}
+        </p>{/if}
       <Dialog.Footer class="editor-footer"
-        ><Button variant="ghost" disabled={busy} onclick={dismiss}>取消</Button>
+        ><Button variant="ghost" disabled={busy || applying} onclick={dismiss}
+          >取消</Button
+        >
         <div class="actions">
           {#if step > 0}<Button
               variant="outline"
-              disabled={busy}
+              disabled={busy || applying}
               onclick={() => {
                 step--;
               }}>上一步</Button
             >{/if}<Button
             id="next"
-            disabled={busy ||
-              !selected ||
-              !selected.native_id ||
-              !draft.receiver_url ||
-              (newAccount && !platformSecret)}
+            aria-describedby="next-reason"
+            disabled={busy || applying || verifying || missing.length > 0}
             onclick={next}
-            >{busy ? "正在应用…" : step === 3 ? "保存并应用" : "下一步"}</Button
+            >{draftSavedVersion
+              ? "已保存，正在连接…"
+              : busy
+                ? "正在保存…"
+                : step === 3
+                  ? "保存并应用"
+                  : "下一步"}</Button
           >
         </div></Dialog.Footer
       >{/if}</Dialog.Content
@@ -939,7 +1388,9 @@
             register = false;
             registrationSecret = "";
           }}>取消</Button
-        ><Button type="submit" disabled={busy}>保存 agent</Button>
+        ><Button type="submit" disabled={busy || applying}
+          >{busy ? "正在保存…" : "保存 agent"}</Button
+        >
       </div>
     </form></Dialog.Content
   ></Dialog.Root
@@ -958,12 +1409,12 @@
     ><Dialog.Footer
       ><Button
         variant="outline"
-        disabled={busy}
+        disabled={busy || applying}
         onclick={() => {
           removal = null;
         }}>取消</Button
       ><Button
-        disabled={busy}
+        disabled={busy || applying}
         onclick={() =>
           run(async () => {
             await save(
@@ -1001,9 +1452,8 @@
       id="share"
       type="url"
       bind:value={share}
-    /><Button disabled={busy} onclick={makeQR}>生成二维码</Button>{#if error}<p
-        role="alert"
-      >
+    /><Button disabled={busy || applying} onclick={makeQR}>生成二维码</Button
+    >{#if error}<p role="alert">
         {error}
       </p>{/if}{#if qr?.image}<img
         class="qr"
@@ -1029,7 +1479,7 @@
           target="_blank"
           rel="noopener noreferrer">打开链接</Button
         ><Button
-          disabled={busy}
+          disabled={busy || applying}
           onclick={() =>
             run(async () => {
               await save(

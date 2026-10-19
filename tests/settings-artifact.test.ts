@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:net";
 import { stringify } from "smol-toml";
+import { until } from "./fixtures/state";
 import { processFixture } from "./fixtures/process";
 async function freePort() {
   const s = createServer();
@@ -116,7 +117,14 @@ test("extracted artifact provisions separate admin, serves complete local UI, ap
         ],
       }),
     });
-    expect((await response.json()).applied).toBe(true);
+    const ack = await response.json();
+    expect(ack.saved).toBe(true);
+    expect(ack.applied).toBe(false);
+    await until(
+      async () =>
+        (await (await fetch(origin + "/api/status", { headers })).json())
+          .applied,
+    );
     expect(await readFile(path, "utf8")).not.toContain(receiverSecret);
     serving.kill("SIGTERM");
     expect((await serving.exited).code).toBe(0);

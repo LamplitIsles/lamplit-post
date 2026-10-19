@@ -7,6 +7,14 @@ import { Fault, need } from "./errors";
 import { isShareURL } from "./config";
 import { MatrixUserBot } from "./matrix";
 import QRCode from "qrcode";
+import { ConfigSchema } from "./config";
+import { verifyMatrix } from "./matrix-draft";
+import { authorizeQQ } from "./qq-connect";
+import type {
+  startQrConnect,
+  QrConnectCredentials,
+} from "@tencent-connect/qqbot-connector";
+import { randomBytes } from "node:crypto";
 class Unauthorized extends Error {}
 function auth(value: unknown): asserts value {
   if (!value) throw new Unauthorized();
@@ -29,6 +37,8 @@ async function body(req: IncomingMessage) {
 export async function serveSettings(
   settings: Settings,
   root = resolve(__dirname, "web"),
+  connector?: typeof startQrConnect,
+  qrLifetime = 120000,
 ) {
   const cfg = settings.config.settings!;
   const origin = new URL(cfg.origin);
@@ -41,7 +51,52 @@ export async function serveSettings(
   const admin = new Admin();
   const jobs = new Set<Promise<void>>();
   let closing = false;
+  let stopping: Promise<void> | undefined;
+  type QQDraft = {
+    id: string;
+    owner: string;
+    expires: number;
+    state: string;
+    image: string | null;
+    native_id: string | null;
+    imageVersion: number;
+    account_id?: string;
+    credential?: QrConnectCredentials;
+    controller: AbortController;
+    flow: ReturnType<typeof authorizeQQ>;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  let qq: QQDraft | undefined;
+  let qrMutating = false;
+  async function cancelQQ(state = "cancelled") {
+    const draft = qq;
+    if (!draft) return;
+    draft.state = state;
+    draft.credential = undefined;
+    draft.image = null;
+    clearTimeout(draft.timer);
+    draft.controller.abort();
+    draft.flow.cancel();
+    await draft.flow.done;
+    draft.flow = { cancel() {}, done: Promise.resolve(null) };
+  }
+  const publicQQ = () =>
+    qq && {
+      id: qq.id,
+      expires: qq.expires,
+      state: qq.state,
+      image: qq.image,
+      native_id: qq.native_id,
+      account_id: qq.account_id,
+    };
   const server = createServer((req, res) => {
+    req.socket.setTimeout(10000);
+    const controller = new AbortController();
+    const cancelled = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    res.once("close", cancelled);
+    req.once("aborted", cancelled);
     const work = (async () => {
       const send = (status: number, value: unknown) => {
         res.writeHead(status, { "Content-Type": "application/json" });
@@ -87,6 +142,7 @@ export async function serveSettings(
           if (path === "/api/session" && method === "GET")
             return send(200, { csrf: session.csrf });
           if (path === "/api/logout" && method === "POST") {
+            if (qq?.owner === token) await cancelQQ();
             admin.sessions.delete(token);
             res.setHeader(
               "Set-Cookie",
@@ -94,13 +150,270 @@ export async function serveSettings(
             );
             return send(200, { loggedOut: true });
           }
+          if (path === "/api/status" && method === "GET")
+            return send(200, settings.status());
           if (path === "/api/settings" && method === "GET")
-            return send(200, await settings.serialize(() => settings.view()));
+            return send(200, await settings.view());
           if (path === "/api/settings" && method === "POST") {
             const input = await body(req);
             for (const a of input.accounts ?? [])
               if (a.share_url) a.share_url = shareURL(a.share_url);
-            return send(200, await settings.save(input));
+            const authorization = input.qq_authorization;
+            delete input.qq_authorization;
+            let consumed: QQDraft | undefined;
+            if (authorization) {
+              auth(qq?.owner === token && qq.id === authorization.id);
+              need(
+                qq!.state === "authorized" &&
+                  qq!.credential &&
+                  qq!.expires > Date.now(),
+                "unavailable",
+              );
+              const account = input.accounts?.find(
+                (a: any) => a.id === authorization.account_id,
+              );
+              need(
+                account?.platform === "qq" &&
+                  account.id === qq!.account_id &&
+                  account.native_id === qq!.credential.appId,
+                "invalid_request",
+              );
+              need(
+                !(input.secrets ?? []).some(
+                  (s: any) => s.ref === account.credential,
+                ),
+                "invalid_request",
+              );
+              input.secrets = [
+                ...(input.secrets ?? []),
+                {
+                  ref: account.credential,
+                  account: account.id,
+                  kind: "platform",
+                  value: qq!.credential.appSecret,
+                },
+              ];
+              consumed = qq;
+            }
+            const saving = settings.save(input);
+            const applied = settings.pending;
+            const result = await saving;
+            if (
+              result.saved &&
+              consumed &&
+              qq === consumed &&
+              consumed.credential
+            ) {
+              const draft = consumed;
+              draft.state = "applying";
+              const completion = applied.then(async () => {
+                if (qq !== draft || draft.state !== "applying") return;
+                if (settings.status().applied) await cancelQQ("committed");
+                else if (draft.expires > Date.now()) draft.state = "authorized";
+                else await cancelQQ("expired");
+              });
+              jobs.add(completion);
+              void completion.finally(() => jobs.delete(completion));
+            }
+            return send(200, result);
+          }
+          if (path === "/api/matrix/verify" && method === "POST") {
+            req.socket.setTimeout(settings.config.timeout_ms + 1000);
+            const input = await body(req);
+            need(
+              input &&
+                Object.keys(input).every((k) =>
+                  ["account", "credential"].includes(k),
+                ),
+              "invalid_request",
+            );
+            const account = ConfigSchema.shape.accounts.element.parse(
+              input.account,
+            );
+            need(account.platform === "matrix", "invalid_request");
+            need(!settings.status().busy, "conflict");
+            const next = ConfigSchema.parse({
+              ...settings.config,
+              accounts: [
+                ...settings.config.accounts.filter((a) => a.id !== account.id),
+                account,
+              ],
+            });
+            if (settings.config.accounts.some((a) => a.id === account.id))
+              settings.validate(next);
+            need(
+              input.credential === undefined ||
+                (typeof input.credential === "string" &&
+                  input.credential.length > 0 &&
+                  input.credential.length <= 16384),
+              "invalid_request",
+            );
+            need(
+              input.credential !== undefined ||
+                settings.config.accounts.some((a) => a.id === account.id),
+              "invalid_request",
+            );
+            const credential =
+              input.credential ??
+              (await settings.store.secret(
+                account.credential,
+                account.id,
+                "platform",
+              ));
+            const signal = AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(settings.config.timeout_ms),
+            ]);
+            return send(
+              200,
+              await verifyMatrix(
+                account,
+                credential,
+                settings.store,
+                signal,
+                (verified) => {
+                  const id = settings.verifiedDraftId(
+                    "matrix",
+                    verified,
+                    account.id,
+                  );
+                  const normalized = { ...account, id };
+                  settings.validate(
+                    ConfigSchema.parse({
+                      ...settings.config,
+                      accounts: [
+                        ...settings.config.accounts.filter((a) => a.id !== id),
+                        normalized,
+                      ],
+                    }),
+                  );
+                  return normalized;
+                },
+              ),
+            );
+          }
+          if (path === "/api/connect/qq" && method === "GET") {
+            auth(
+              qq?.owner === token &&
+                new URL(req.url!, origin).searchParams.get("id") === qq.id,
+            );
+            return send(200, publicQQ());
+          }
+          if (path === "/api/connect/qq" && method === "POST") {
+            need(!qrMutating, "conflict");
+            qrMutating = true;
+            try {
+              const input = await body(req);
+              need(
+                input &&
+                  Object.keys(input).every((k) =>
+                    ["action", "id", "account_id"].includes(k),
+                  ),
+                "invalid_request",
+              );
+              if (input.action === "cancel") {
+                auth(qq?.owner === token && input.id === qq.id);
+                await cancelQQ();
+                return send(200, publicQQ());
+              }
+              need(input.action === "start", "invalid_request");
+              need(
+                typeof input.account_id === "string" &&
+                  /^[a-zA-Z0-9_-]{1,64}$/.test(input.account_id),
+                "invalid_request",
+              );
+              need(
+                !qq ||
+                  [
+                    "cancelled",
+                    "committed",
+                    "expired",
+                    "failed",
+                    "conflict",
+                  ].includes(qq.state),
+                "conflict",
+              );
+              if (qq) await cancelQQ();
+              auth(!closing && admin.session(token));
+              const draft = {
+                id: randomBytes(24).toString("base64url"),
+                owner: token,
+                expires: Date.now() + qrLifetime,
+                state: "starting",
+                image: null,
+                native_id: null,
+                imageVersion: 0,
+                controller: new AbortController(),
+              } as QQDraft;
+              qq = draft;
+              draft.flow = authorizeQQ(
+                draft.controller.signal,
+                (url) => {
+                  if (qq !== draft || draft.controller.signal.aborted) return;
+                  draft.state = url ? "waiting" : "refreshing";
+                  draft.image = null;
+                  const imageVersion = ++draft.imageVersion;
+                  if (url) {
+                    const address = new URL(url);
+                    if (
+                      address.protocol !== "https:" ||
+                      address.hostname !== "q.qq.com" ||
+                      (address.port && address.port !== "443") ||
+                      address.pathname !== "/qqbot/openclaw/connect.html" ||
+                      address.username ||
+                      address.password ||
+                      address.hash ||
+                      url.length > 4096
+                    ) {
+                      draft.controller.abort();
+                      return;
+                    }
+                    const image = QRCode.toDataURL(url, {
+                      width: 280,
+                      margin: 4,
+                    })
+                      .then((value) => {
+                        if (
+                          qq === draft &&
+                          draft.imageVersion === imageVersion &&
+                          draft.state === "waiting" &&
+                          !draft.controller.signal.aborted
+                        )
+                          draft.image = value;
+                      })
+                      .catch(() => draft.controller.abort());
+                    jobs.add(image);
+                    void image.finally(() => jobs.delete(image));
+                  }
+                },
+                connector,
+              );
+              draft.timer = setTimeout(() => {
+                if (qq === draft) void cancelQQ("expired");
+              }, qrLifetime);
+              void draft.flow.done.then((credential) => {
+                if (qq !== draft || draft.controller.signal.aborted) return;
+                if (credential) {
+                  try {
+                    draft.account_id = settings.verifiedDraftId(
+                      "qq",
+                      credential.appId,
+                      input.account_id,
+                    );
+                  } catch {
+                    void cancelQQ("conflict");
+                    return;
+                  }
+                }
+                draft.credential = credential ?? undefined;
+                draft.native_id = credential?.appId ?? null;
+                draft.state = credential ? "authorized" : "failed";
+                draft.image = null;
+              });
+              return send(200, publicQQ());
+            } finally {
+              qrMutating = false;
+            }
           }
           if (path === "/api/token" && method === "POST") {
             const input = await body(req);
@@ -127,12 +440,22 @@ export async function serveSettings(
               200,
               await settings.serialize(async () => {
                 const service = settings.app.service!;
-                const account = settings.config.accounts.find(
-                  (a) => a.id === input.account_id,
-                );
+                const authorizedDraft =
+                  input.qq_authorization &&
+                  qq?.owner === token &&
+                  qq.id === input.qq_authorization &&
+                  qq.state === "authorized" &&
+                  qq.account_id === input.account_id;
+                const account =
+                  settings.config.accounts.find(
+                    (a) => a.id === input.account_id,
+                  ) ??
+                  (authorizedDraft
+                    ? { id: qq!.account_id!, platform: "qq" }
+                    : undefined);
                 need(account, "invalid_request");
                 const platform = service.platforms.get(account.id);
-                need(platform?.ready, "unavailable");
+                need(authorizedDraft || platform?.ready, "unavailable");
                 const observed = settings.store.db
                   .prepare(
                     "SELECT c.id, c.native, c.type, c.name, EXISTS(SELECT 1 FROM messages m WHERE m.account=c.account AND m.conversation=c.id) AS observed FROM conversations c WHERE c.account=? ORDER BY c.seq DESC LIMIT 200",
@@ -217,11 +540,26 @@ export async function serveSettings(
                 : code === "unavailable"
                   ? 503
                   : 400,
-            { error: code },
+            {
+              error: code,
+              ...(code === "conflict" && settings.status().busy
+                ? { busy: true }
+                : {}),
+            },
           );
         else res.destroy();
       } finally {
-        if (!req.complete) req.destroy();
+        req.socket.setTimeout(10000);
+        res.removeListener("close", cancelled);
+        req.removeListener("aborted", cancelled);
+        // The request callback can finish before Node emits message completion for
+        // a valid bodyless GET. Preserve that socket; only discard unread bodies.
+        if (
+          !req.complete &&
+          (req.headers["transfer-encoding"] ||
+            Number(req.headers["content-length"] ?? 0) > 0)
+        )
+          req.destroy();
       }
     })();
     jobs.add(work);
@@ -237,17 +575,19 @@ export async function serveSettings(
       resolve();
     });
   });
-  return {
-    server,
-    async stop() {
+  const stop = () =>
+    (stopping ??= (async () => {
       closing = true;
       const stopped = new Promise<void>((resolve) =>
         server.close(() => resolve()),
       );
       server.closeAllConnections();
+      await cancelQQ();
       await Promise.allSettled([...jobs]);
       await stopped;
+      qq = undefined;
       admin.sessions.clear();
-    },
-  };
+    })());
+  settings.retireManagement = stop;
+  return { server, stop };
 }

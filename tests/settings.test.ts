@@ -21,7 +21,7 @@ test("real management login, persisted empty registration, stale/CSRF/channel re
     expect((await f.request("settings")).status).toBe(401);
     expect(
       (
-        await f.request("settings", undefined, {
+        await f.apply("settings", undefined, {
           Authorization: "Bearer " + f.state.token,
         })
       ).status,
@@ -43,16 +43,16 @@ test("real management login, persisted empty registration, stale/CSRF/channel re
     });
     const before = await readFile(f.path, "utf8");
     expect(
-      (await f.request("settings", update, { "X-Post-CSRF": "wrong" })).status,
+      (await f.apply("settings", update, { "X-Post-CSRF": "wrong" })).status,
     ).toBe(401);
     expect(
-      (await f.request("settings", update, { origin: "https://evil.example" }))
+      (await f.apply("settings", update, { origin: "https://evil.example" }))
         .status,
     ).toBe(401);
     expect(await readFile(f.path, "utf8")).toBe(before);
     const owner = f.app.store;
     const saved = await (
-      await f.request("settings", {
+      await f.apply("settings", {
         ...update,
         secrets: [
           {
@@ -69,7 +69,7 @@ test("real management login, persisted empty registration, stale/CSRF/channel re
     expect(owner.owner.closed).toBe(false);
     await expect(Store.open(f.config)).rejects.toThrow();
     expect((await stat(f.path)).mode & 0o777).toBe(0o600);
-    expect((await f.request("settings", update)).status).toBe(409);
+    expect((await f.apply("settings", update)).status).toBe(409);
     const text = JSON.stringify(saved);
     expect(text).not.toContain("distinct-receiver-fixture");
     expect(text).not.toContain("owned-fixture-password");
@@ -108,7 +108,7 @@ test("SDK configuration restart preserves owner, pins, unknown sends, shared ind
     ]) {
       const bad = structuredClone(initial);
       mutate(bad);
-      expect((await f.request("settings", bad)).status).toBe(409);
+      expect((await f.apply("settings", bad)).status).toBe(409);
       expect(await readFile(f.path, "utf8")).toBe(before);
       expect(f.app.app.service!.closed).toBe(false);
     }
@@ -133,7 +133,7 @@ test("SDK configuration restart preserves owner, pins, unknown sends, shared ind
       scopes: [update.bindings[0].scopes[0]],
     });
     const response = await (
-      await f.request("settings", {
+      await f.apply("settings", {
         ...update,
         secrets: [
           {
@@ -231,7 +231,7 @@ test("failed SDK readiness restores TOML and sealed credentials, then retry appl
       homeserver: f.platform.url,
     });
     const saved = await (
-      await f.request("settings", {
+      await f.apply("settings", {
         ...initial,
         secrets: [
           {
@@ -255,7 +255,7 @@ test("failed SDK readiness restores TOML and sealed credentials, then retry appl
     expect(f.app.app.service!.closed).toBe(false);
     const retry = editable(await (await f.request("settings")).json());
     retry.bindings[0].wake.aliases = ["retry"];
-    expect((await (await f.request("settings", retry)).json()).applied).toBe(
+    expect((await (await f.apply("settings", retry)).json()).applied).toBe(
       true,
     );
   } finally {
@@ -296,7 +296,7 @@ test("actual native send and immutable pending delivery retire across settings a
       );
     const update = editable(await (await f.request("settings")).json());
     update.bindings[0].enabled = false;
-    const response = await (await f.request("settings", update)).json();
+    const response = await (await f.apply("settings", update)).json();
     expect(response.applied).toBe(true);
     const result = await send;
     expect(result.status).toBe("unknown");
@@ -318,7 +318,7 @@ test("actual native send and immutable pending delivery retire across settings a
     const retry = editable(await (await f.request("settings")).json());
     retry.bindings[0].enabled = true;
     f.platform.stall(false);
-    expect((await (await f.request("settings", retry)).json()).applied).toBe(
+    expect((await (await f.apply("settings", retry)).json()).applied).toBe(
       true,
     );
     expect(
@@ -431,7 +431,7 @@ test("pausing the last binding removes machine HTTP and asset upload authority",
     const asset = await upload.json();
     const update = editable(await (await f.request("settings")).json());
     update.bindings[0].enabled = false;
-    expect((await (await f.request("settings", update)).json()).applied).toBe(
+    expect((await (await f.apply("settings", update)).json()).applied).toBe(
       true,
     );
     const url = f.app.app.http!.url;

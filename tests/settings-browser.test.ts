@@ -141,14 +141,44 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       ).toBe(true);
       await click("编辑绑定");
       await browser(["fill", "#credential", correctedA]);
+      await click("验证并读取房间");
+      await wait("document.body.textContent.includes('账号已验证')");
       await click("下一步");
       await click("下一步");
       await click("下一步");
       await click("保存并应用");
       await wait("!document.querySelector('[role=dialog]')");
+      await wait("document.body.textContent.includes('设置已生效')");
       expect(
         await evaluate("document.body.textContent.includes('设置已生效')"),
       ).toBe(true);
+      // Canonical existing TOML, only the write-only credential changes. Verification
+      // succeeds before this owned provider invalidates it for the actual apply.
+      const beforeReplacement = await readFile(path, "utf8");
+      await click("编辑绑定");
+      await browser(["fill", "#credential", replacementA]);
+      a.matrixCredential(replacementA);
+      await click("验证并读取房间");
+      await wait("document.body.textContent.includes('账号已验证')");
+      a.matrixCredential(correctedA);
+      await click("下一步");
+      await click("下一步");
+      await click("下一步");
+      await click("保存并应用");
+      await wait("document.body.textContent.includes('已保留账号和聊天草稿')");
+      expect(
+        await evaluate(
+          "!!document.querySelector('[role=dialog]') && document.querySelector('#credential').value.length > 0",
+        ),
+      ).toBe(true);
+      expect(await readFile(path, "utf8")).toBe(beforeReplacement);
+      expect(
+        await evaluate(
+          "(async()=>{const s=await(await fetch('/api/status')).json();return s.ready && !s.saved && !s.applied && s.state==='failed_recovered' && s.accepted_version===s.active_version})()",
+        ),
+      ).toBe(true);
+      await browser(["press", "Escape"]);
+      await wait("!document.querySelector('[role=dialog]')");
       await evaluate("window.__ownedSaves=[];true");
       await click("编辑绑定");
       await browser(["fill", "#credential", replacementA]);
@@ -178,10 +208,13 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       await click("下一步");
       await click("保存并应用");
       await wait("window.__ownedSaves.length > 0");
-      expect(await evaluate("window.__ownedSaves[0].applied === true")).toBe(
-        true,
-      );
+      expect(
+        await evaluate(
+          "window.__ownedSaves[0].saved === true && window.__ownedSaves[0].applied === false",
+        ),
+      ).toBe(true);
       await wait("!document.querySelector('[role=dialog]')");
+      await wait("document.body.textContent.includes('设置已生效')");
       expect(
         b.calls.some(
           (c) =>

@@ -391,12 +391,12 @@ dd {
   display: flex;
   flex-direction: row;
   justify-content: space-between;
-  position: sticky;
-  bottom: -24px;
+  position: static;
+  flex-shrink: 0;
   background: var(--background);
   border-top: 1px solid var(--border);
   padding-top: 16px;
-  margin-top: auto;
+  margin-top: 0;
 }
 .connection-note {
   font-size: 12px;
@@ -485,9 +485,6 @@ dd {
     gap: 14px;
     font-size: 11px;
   }
-  .editor-footer {
-    bottom: -20px;
-  }
   .notice {
     flex-wrap: wrap;
   }
@@ -523,7 +520,8 @@ dd {
   overflow-y: auto;
 }
 .editor-body {
-  min-height: 260px;
+  min-height: 0;
+  flex: 0 0 auto;
 }
 .qr {
   max-width: 100%;
@@ -588,4 +586,24 @@ a {
 .nav-label,
 .sidebar-note {
   color: oklch(0.46 0 0);
+}
+
+.binding-dialog > * {
+  flex-shrink: 0;
+}
+.connect-panel {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.connect-panel p {
+  font-size: 13px;
+  line-height: 1.6;
+  margin-bottom: 10px;
+}
+.text-link {
+  text-decoration: underline;
+  cursor: pointer;
+  font-weight: 550;
 }

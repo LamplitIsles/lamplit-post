@@ -7,6 +7,7 @@ import { provisionAdmin } from "../../src/admin";
 import { platformsFixture } from "./platforms";
 import { stateFixture, until } from "./state";
 import { consumerFixture } from "./consumer";
+import type { startQrConnect } from "@tencent-connect/qqbot-connector";
 import { Store } from "../../src/store";
 async function port() {
   const s = createServer();
@@ -15,10 +16,16 @@ async function port() {
   await new Promise<void>((r) => s.close(() => r()));
   return p;
 }
-export async function settingsFixture(empty = false) {
+export async function settingsFixture(
+  empty = false,
+  timeout = 1500,
+  connector?: typeof startQrConnect,
+  qrLifetime?: number,
+  staticRoot?: string,
+) {
   const platform = await platformsFixture(),
     receiver = await consumerFixture(false),
-    state = await stateFixture(platform.url, receiver.url);
+    state = await stateFixture(platform.url, receiver.url, timeout);
   const p = await port();
   const config = {
     ...state.config,
@@ -37,7 +44,7 @@ export async function settingsFixture(empty = false) {
     qqGateway: platform.gateway,
   });
   await app.start();
-  const web = await serveSettings(app);
+  const web = await serveSettings(app, staticRoot, connector, qrLifetime);
   let cookie = "",
     csrf = "";
   async function request(
@@ -67,6 +74,16 @@ export async function settingsFixture(empty = false) {
     path,
     config,
     request,
+    async apply(
+      route: string,
+      input: unknown,
+      headers: Record<string, string> = {},
+    ) {
+      const response = await request(route, input, headers);
+      if (!response.ok) return response;
+      await until(async () => !(await (await request("status")).json()).busy);
+      return Response.json(await (await request("settings")).json());
+    },
     async login() {
       const response = await request("login", {
         password: "owned-fixture-password",

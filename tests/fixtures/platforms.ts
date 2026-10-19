@@ -20,11 +20,14 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     sequence = 0;
   let stopped = false;
   let matrixCredential: string | undefined;
+  let whoamiDelay = 0;
+  let matrixReadDelay = 0;
   let permission = false,
     tokenStall = false,
     failureStatus = 500;
   let joined = true,
     encrypted = false;
+  let encryptedNative: string | undefined;
   let aborts = 0;
   let matrixEvents: any[] = [];
   let syncWake: (() => void) | undefined;
@@ -151,13 +154,50 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
         ),
         { headers: { "Content-Type": "image/png" } },
       );
+    if (
+      matrixReadDelay &&
+      path.startsWith("/_matrix/") &&
+      !path.endsWith("/sync")
+    ) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(done, matrixReadDelay);
+        function done() {
+          clearTimeout(timer);
+          req.signal.removeEventListener("abort", done);
+          resolve();
+        }
+        req.signal.addEventListener("abort", done, { once: true });
+      });
+      if (req.signal.aborted) {
+        aborts++;
+        return new Response(null, { status: 499 });
+      }
+    }
     if (path.endsWith("/versions"))
       return json({ versions: ["v1.11"], unstable_features: {} });
-    if (path.endsWith("/whoami"))
+    if (path.endsWith("/whoami")) {
+      if (whoamiDelay) {
+        const delay = whoamiDelay;
+        whoamiDelay = 0;
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(done, delay);
+          function done() {
+            clearTimeout(timer);
+            req.signal.removeEventListener("abort", done);
+            resolve();
+          }
+          req.signal.addEventListener("abort", done, { once: true });
+        });
+        if (req.signal.aborted) {
+          aborts++;
+          return new Response(null, { status: 499 });
+        }
+      }
       return matrixCredential !== undefined &&
         req.headers.get("authorization") !== `Bearer ${matrixCredential}`
         ? json({ errcode: "M_UNKNOWN_TOKEN" }, 401)
         : json({ user_id: matrixIdentity });
+    }
     if (path.endsWith("/joined_rooms"))
       return json({
         joined_rooms: joined ? ["!room:fixture", "!dm:fixture"] : [],
@@ -173,7 +213,10 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
       });
     if (path.endsWith("/state"))
       return json([
-        ...(encrypted
+        { type: "m.room.name", content: { name: "Owned fixture room" } },
+        ...(encrypted ||
+        (encryptedNative &&
+          decodeURIComponent(path).includes("/rooms/" + encryptedNative + "/"))
           ? [
               {
                 type: "m.room.encryption",
@@ -259,6 +302,12 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
   });
   return {
     calls,
+    delayMatrixReads(ms: number) {
+      matrixReadDelay = ms;
+    },
+    delayWhoami(ms: number) {
+      whoamiDelay = ms;
+    },
     matrixCredential(value: string) {
       matrixCredential = value;
     },
@@ -311,6 +360,9 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     },
     joined(v: boolean) {
       joined = v;
+    },
+    encryptedRoom(native: string) {
+      encryptedNative = native;
     },
     encrypted(v: boolean) {
       encrypted = v;

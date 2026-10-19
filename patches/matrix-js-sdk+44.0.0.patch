@@ -1,3 +1,106 @@
+diff --git a/node_modules/matrix-js-sdk/lib/capabilityPoller.js b/node_modules/matrix-js-sdk/lib/capabilityPoller.js
+index a1d0e4b..ed039f9 100644
+--- a/node_modules/matrix-js-sdk/lib/capabilityPoller.js
++++ b/node_modules/matrix-js-sdk/lib/capabilityPoller.js
+@@ -33,23 +33,27 @@ export class CapabilityPoller extends TypedEventEmitter {
+   constructor(logger, http, name) {
+     super();
+     _defineProperty(this, "cached", void 0);
++    _defineProperty(this, "generation", 0);
+     _defineProperty(this, "retryTimeout", void 0);
+     _defineProperty(this, "refreshTimeout", void 0);
+-    _defineProperty(this, "poll", async () => {
++    _defineProperty(this, "poll", async generation => {
++      if (generation !== this.generation) return;
+       this.logger.debug("Checking capabilites");
+       try {
+         const current = this.cached;
+         await this.fetch();
++        if (generation !== this.generation) return;
+         this.clearTimeouts();
+-        this.refreshTimeout = globalThis.setTimeout(this.poll, CAPABILITIES_CACHE_MS);
++        this.refreshTimeout = globalThis.setTimeout(() => this.poll(generation), CAPABILITIES_CACHE_MS);
+         this.logger.debug(`Fetched new server ${this.name}`);
+         if (this.cached && !deepCompare(current, this.cached)) {
+           this.emit("update", this.cached);
+         }
+       } catch (e) {
++        if (generation !== this.generation) return;
+         this.clearTimeouts();
+         const howLong = Math.floor(CAPABILITIES_RETRY_MS + Math.random() * 5000);
+-        this.retryTimeout = globalThis.setTimeout(this.poll, howLong);
++        this.retryTimeout = globalThis.setTimeout(() => this.poll(generation), howLong);
+         this.logger.warn(`Failed to refresh ${this.name}: retrying in ${howLong}ms`, e);
+       }
+     });
+@@ -62,13 +66,15 @@ export class CapabilityPoller extends TypedEventEmitter {
+    * Starts periodically fetching the server capabilities.
+    */
+   start() {
+-    this.poll().then();
++    this.clearTimeouts();
++    void this.poll(++this.generation);
+   }
+ 
+   /**
+    * Stops the service
+    */
+   stop() {
++    ++this.generation;
+     this.clearTimeouts();
+   }
+ 
+diff --git a/node_modules/matrix-js-sdk/lib/client.js b/node_modules/matrix-js-sdk/lib/client.js
+index 5c0666e..4fb1a72 100644
+--- a/node_modules/matrix-js-sdk/lib/client.js
++++ b/node_modules/matrix-js-sdk/lib/client.js
+@@ -340,6 +340,7 @@ export class MatrixClient extends TypedEventEmitter {
+     _defineProperty(this, "legacyPickleKey", void 0);
+     _defineProperty(this, "scheduler", void 0);
+     _defineProperty(this, "clientRunning", false);
++    _defineProperty(this, "startGeneration", 0);
+     _defineProperty(this, "timelineSupport", false);
+     _defineProperty(this, "urlPreviewCache", {});
+     _defineProperty(this, "identityServer", void 0);
+@@ -590,6 +591,7 @@ export class MatrixClient extends TypedEventEmitter {
+       // client is already running.
+       return;
+     }
++    const generation = ++this.startGeneration;
+     this.clientRunning = true;
+     this.on(ClientEvent.Sync, this.startMatrixRTC);
+ 
+@@ -614,6 +616,7 @@ export class MatrixClient extends TypedEventEmitter {
+     }
+     try {
+       await this.getVersions();
++      if (!this.clientRunning || generation !== this.startGeneration) return;
+ 
+       // This should be done with `canSupport`
+       // TODO: https://github.com/vector-im/element-web/issues/23643
+@@ -622,12 +625,14 @@ export class MatrixClient extends TypedEventEmitter {
+         list,
+         fwdPagination
+       } = await this.doesServerSupportThread();
++      if (!this.clientRunning || generation !== this.startGeneration) return;
+       Thread.setServerSideSupport(threads);
+       Thread.setServerSideListSupport(list);
+       Thread.setServerSideFwdPaginationSupport(fwdPagination);
+     } catch (e) {
+       this.logger.error("Can't fetch server versions, continuing to initialise sync, this will be retried later", e);
+     }
++    if (!this.clientRunning || generation !== this.startGeneration) return;
+     this.clientOpts = opts ?? {};
+     if (this.clientOpts.slidingSync) {
+       this.syncApi = new SlidingSyncSdk(this.clientOpts.slidingSync, this, this.clientOpts, this.buildSyncApiOptions());
+@@ -670,6 +675,7 @@ export class MatrixClient extends TypedEventEmitter {
+    * clean shutdown.
+    */
+   stopClient() {
++    ++this.startGeneration;
+     this.cryptoBackend?.stop(); // crypto might have been initialised even if the client wasn't fully started
+ 
+     this.off(ClientEvent.Sync, this.startMatrixRTC);
 diff --git a/node_modules/matrix-js-sdk/lib/http-api/utils.js b/node_modules/matrix-js-sdk/lib/http-api/utils.js
 index b34b58f3a1f5a33c55c5474a0e25f75e275c4e94..2b861ff220999ecf7b595acbed5d0fd6d5122651 100644
 --- a/node_modules/matrix-js-sdk/lib/http-api/utils.js
@@ -15,6 +118,132 @@ index b34b58f3a1f5a33c55c5474a0e25f75e275c4e94..2b861ff220999ecf7b595acbed5d0fd6
  }
  export function anySignal(signals) {
    const controller = new AbortController();
+diff --git a/node_modules/matrix-js-sdk/lib/sync.js b/node_modules/matrix-js-sdk/lib/sync.js
+index 644e70c..ebfd074 100644
+--- a/node_modules/matrix-js-sdk/lib/sync.js
++++ b/node_modules/matrix-js-sdk/lib/sync.js
+@@ -1344,6 +1344,7 @@ export class SyncApi {
+    * @returns which resolves once the connection returns
+    */
+   startKeepAlives(delay) {
++    if (!this.running) return Promise.reject(new Error("SyncApi.stop() was called"));
+     if (delay === undefined) {
+       delay = 2000 + Math.floor(Math.random() * 5000);
+     }
+@@ -1399,6 +1400,7 @@ export class SyncApi {
+     }).then(() => {
+       success();
+     }, err => {
++      if (!this.running) return;
+       if (err.httpStatus == 400 || err.httpStatus == 404) {
+         // treat this as a success because the server probably just doesn't
+         // support /versions: point is, we're getting a response.
+diff --git a/node_modules/matrix-js-sdk/src/capabilityPoller.ts b/node_modules/matrix-js-sdk/src/capabilityPoller.ts
+index be989c9..c50b7f1 100644
+--- a/node_modules/matrix-js-sdk/src/capabilityPoller.ts
++++ b/node_modules/matrix-js-sdk/src/capabilityPoller.ts
+@@ -35,6 +35,7 @@ export abstract class CapabilityPoller<ResponseType> extends TypedEventEmitter<
+     { update: (data: ResponseType) => void }
+ > {
+     protected cached?: ResponseType;
++    private generation = 0;
+     private retryTimeout?: ReturnType<typeof setTimeout>;
+     private refreshTimeout?: ReturnType<typeof setInterval>;
+ 
+@@ -50,13 +51,15 @@ export abstract class CapabilityPoller<ResponseType> extends TypedEventEmitter<
+      * Starts periodically fetching the server capabilities.
+      */
+     public start(): void {
+-        this.poll().then();
++        this.clearTimeouts();
++        void this.poll(++this.generation);
+     }
+ 
+     /**
+      * Stops the service
+      */
+     public stop(): void {
++        ++this.generation;
+         this.clearTimeouts();
+     }
+ 
+@@ -70,21 +73,24 @@ export abstract class CapabilityPoller<ResponseType> extends TypedEventEmitter<
+ 
+     public abstract fetch(): Promise<ResponseType>;
+ 
+-    private poll = async (): Promise<void> => {
++    private poll = async (generation: number): Promise<void> => {
++        if (generation !== this.generation) return;
+         this.logger.debug("Checking capabilites");
+         try {
+             const current = this.cached;
+             await this.fetch();
++            if (generation !== this.generation) return;
+             this.clearTimeouts();
+-            this.refreshTimeout = globalThis.setTimeout(this.poll, CAPABILITIES_CACHE_MS);
++            this.refreshTimeout = globalThis.setTimeout(() => this.poll(generation), CAPABILITIES_CACHE_MS);
+             this.logger.debug(`Fetched new server ${this.name}`);
+             if (this.cached && !deepCompare(current, this.cached)) {
+                 this.emit("update", this.cached);
+             }
+         } catch (e) {
++            if (generation !== this.generation) return;
+             this.clearTimeouts();
+             const howLong = Math.floor(CAPABILITIES_RETRY_MS + Math.random() * 5000);
+-            this.retryTimeout = globalThis.setTimeout(this.poll, howLong);
++            this.retryTimeout = globalThis.setTimeout(() => this.poll(generation), howLong);
+             this.logger.warn(`Failed to refresh ${this.name}: retrying in ${howLong}ms`, e);
+         }
+     };
+diff --git a/node_modules/matrix-js-sdk/src/client.ts b/node_modules/matrix-js-sdk/src/client.ts
+index 8f0a902..d1ebfae 100644
+--- a/node_modules/matrix-js-sdk/src/client.ts
++++ b/node_modules/matrix-js-sdk/src/client.ts
+@@ -1325,6 +1325,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
+ 
+     public readonly matrixRTC: MatrixRTCSessionManager;
+ 
++    private startGeneration = 0;
+     private serverCapabilitiesService: ServerCapabilities;
+     public readonly retentionPolicyService: RetentionPolicyService;
+     public readonly _unstable_shouldApplyMessageRetention: boolean;
+@@ -1481,6 +1482,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
+             // client is already running.
+             return;
+         }
++        const generation = ++this.startGeneration;
+         this.clientRunning = true;
+ 
+         this.on(ClientEvent.Sync, this.startMatrixRTC);
+@@ -1508,10 +1510,12 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
+ 
+         try {
+             await this.getVersions();
++            if (!this.clientRunning || generation !== this.startGeneration) return;
+ 
+             // This should be done with `canSupport`
+             // TODO: https://github.com/vector-im/element-web/issues/23643
+             const { threads, list, fwdPagination } = await this.doesServerSupportThread();
++            if (!this.clientRunning || generation !== this.startGeneration) return;
+             Thread.setServerSideSupport(threads);
+             Thread.setServerSideListSupport(list);
+             Thread.setServerSideFwdPaginationSupport(fwdPagination);
+@@ -1522,6 +1526,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
+             );
+         }
+ 
++        if (!this.clientRunning || generation !== this.startGeneration) return;
+         this.clientOpts = opts ?? {};
+         if (this.clientOpts.slidingSync) {
+             this.syncApi = new SlidingSyncSdk(
+@@ -1572,6 +1577,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
+      * clean shutdown.
+      */
+     public stopClient(): void {
++        ++this.startGeneration;
+         this.cryptoBackend?.stop(); // crypto might have been initialised even if the client wasn't fully started
+ 
+         this.off(ClientEvent.Sync, this.startMatrixRTC);
 diff --git a/node_modules/matrix-js-sdk/src/http-api/utils.ts b/node_modules/matrix-js-sdk/src/http-api/utils.ts
 index 8e17de0fa1c751be6c89c6bbb32e614307a7a05c..ea828b3bae0fcea28a77e204ef58ecf3a37f18ed 100644
 --- a/node_modules/matrix-js-sdk/src/http-api/utils.ts
@@ -33,3 +262,23 @@ index 8e17de0fa1c751be6c89c6bbb32e614307a7a05c..ea828b3bae0fcea28a77e204ef58ecf3
  }
  
  export function anySignal(signals: AbortSignal[]): {
+diff --git a/node_modules/matrix-js-sdk/src/sync.ts b/node_modules/matrix-js-sdk/src/sync.ts
+index fbea8e5..3e18428 100644
+--- a/node_modules/matrix-js-sdk/src/sync.ts
++++ b/node_modules/matrix-js-sdk/src/sync.ts
+@@ -1590,6 +1590,7 @@ export class SyncApi {
+      * @returns which resolves once the connection returns
+      */
+     private startKeepAlives(delay?: number): Promise<boolean> {
++        if (!this.running) return Promise.reject(new Error("SyncApi.stop() was called"));
+         if (delay === undefined) {
+             delay = 2000 + Math.floor(Math.random() * 5000);
+         }
+@@ -1654,6 +1655,7 @@ export class SyncApi {
+                     success();
+                 },
+                 (err) => {
++                    if (!this.running) return;
+                     if (err.httpStatus == 400 || err.httpStatus == 404) {
+                         // treat this as a success because the server probably just doesn't
+                         // support /versions: point is, we're getting a response.

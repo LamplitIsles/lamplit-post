@@ -51,50 +51,94 @@ any previous token. Copy it directly to the intended consumer's private secret
 store. The browser session does not authorize machine MCP/assets, and an agent
 Bearer cannot administer Post.
 
-Choose an existing shared account or add a QQ official bot App ID/AppSecret or
-Matrix account ID/homeserver/access token. Enter secrets only in password fields.
-They are written to the existing sealed vault and never returned in settings
-responses. Leaving a replacement field blank retains the existing credential.
-A new binding needs its own receiver credential; expand its consumer connection
-fields. Account credential changes reconnect all uses of that account, while
-chat grants remain independent. Identity/homeserver/credential references are
-immutable once configured; create a distinct account instead of remapping it.
+Choose an existing shared account or add an account. QQ's primary path is **扫码连接 QQ**:
+scan the provider authorization QR in mobile QQ, then explicitly confirm the account,
+chat grants and save. The connector supplies App ID/AppSecret to Post in server memory;
+only the QR/status/App ID reach the browser. This is credential authorization, distinct
+from the secondary configured-bot share QR. Manual App ID/AppSecret remain an explicit
+advanced option. Authorization lasts120000ms including QR refresh; cancel, expiry,
+logout and shutdown discard uncommitted credentials and retire actual native requests.
+A durable save acknowledgement does not consume the authorization: within the original
+lifetime, a failed apply can explicitly retry the same server-held credential. Only
+terminal apply success consumes it; cancel, logout and expiry still erase it immediately.
+An already accepted apply owns its captured credential and continues to its truthful
+outcome if authorization expires or is cancelled; a new attempt requires authorization.
+No real QQ enrollment is performed by automated acceptance.
 
-Grant chats, then configure wake rules separately. QQ candidates distinguish locally observed conversations from configured pins
-without captured messages; they do not constitute a complete QQ directory. Matrix discovery reads joined rooms and their metadata through the
-existing account SDK; encrypted rooms are disabled. Lists are bounded (200 local
-conversations, 100 Matrix rooms); observed state does not grant access. New
-accounts must first save/connect before platform discovery is available, so the
-initial draft can use explicit app-scoped native IDs. Manual entries are not
-claims of upstream verification. Private conversations require explicit peer IDs;
-QQ private scopes must include that same user's openid. Post verifies Matrix
-joined plaintext scope again when an agent uses it.
+For Matrix, enter user ID/homeserver/access token and choose **验证并读取房间** before
+committing. The existing SDK verifies whoami and reads joined rooms/metadata without
+starting sync, pinning identity, storing a credential or granting access. Encrypted
+rooms are shown as unsupported, and a successful empty list differs from a failed
+request. Editing identity/address/token invalidates the result and cancels the prior
+request. Leaving an existing-account replacement blank uses its vaulted credential
+server-side. Cancel discards the draft. Verification/listing share one configured
+operation deadline and retire all request I/O before releasing ownership.
 
-Save waits for controlled apply. Old intake and actual domain/platform I/O drain
-before replacement adapters start. The process retains the same SQLite handle,
-external key and lease through the change; it never opens a second writer.
-Saves serialize and require the current config hash. Invalid references, stale
-versions, changed immutable paths, and persisted identity/conversation remapping
-are rejected before modifying files, secrets or stopping the runtime. Changes to
-the file outside the UI require an offline restart; they cannot be overwritten
-using an old running view.
+Grant chats, then configure wake rules separately. QQ candidates distinguish locally
+observed conversations from configured pins, not a complete upstream directory. Manual
+native IDs are explicit and are not claims of verification. Private conversations still
+require explicit peer IDs. Room visibility is not an agent grant. A new binding needs
+its own receiver credential; missing required values are explained near Next and the
+consumer fields can be revealed directly. Required inputs remain scrollable on short
+normal-zoom desktop/mobile viewports, without a footer painted over them.
 
-The TOML write uses a private same-directory tempfile, fsync and atomic rename.
-On failed readiness, Post attempts to restore the previous TOML, vault values and
-runtime. The response distinguishes `saved` from `applied`; failure is never
-reported as active settings. After trusted administrator/configuration/state
-acquisition, a native transport startup failure keeps authenticated settings
-available with `state: failed`, safe `error: unavailable`, and no machine URL.
-The CLI reports `settings_ready: true` separately from runtime `ready: false`,
-with a null machine URL and unhealthy runtime status. `ready: true` requires
-SDK startup, a bound machine listener and a healthy runtime. Correct the credential
-through the existing binding editor and save to retry under the same Store/key/lease.
-Configuration, administrator-file, key, ownership and persisted pin failures
-remain fatal. Shutdown cancellation still drains startup before releasing
-ownership. Do not delete the database/key to recover. Atomic file writes and vault
-transactions are separate resources: a process crash during apply can leave a saved configuration whose
-upstream readiness has not been established. On reopen it is validated normally;
-back up TOML, vault and external key together while stopped.
+Save first validates optimistic version, references and immutable pins, closes old
+intake and retires actual old I/O. Only then does it update the sealed vault and
+privately atomically fsync/rename the TOML. The HTTP acknowledgement explicitly says
+`saved: true, applied: false, state: applying`; this is durable local persistence, not
+platform readiness. Replacement startup continues as one tracked task under the same
+Store/key/lease. A competing mutation is rejected promptly, not queued behind connect.
+If old retirement cannot finish within the normal local response allowance400ms, this
+attempt returns unsaved/draining and only retires/reopens the unchanged runtime; it
+never silently writes the rejected proposal later. Slow disks are not a realtime guarantee.
+
+The owner target is local acknowledgement p95<=500ms for a declared finite20 valid
+sequential uncontended samples on supported local storage, with median/p95/max and all
+values reported. Provider readiness is measured separately. Visible browser feedback
+target is100ms. Do not improve those metrics by removing fsync, weakening drain or
+counting a queued/received proposal as saved.
+
+Authenticated GET `/api/status` is nonblocking during connect. Settings/status separate
+`accepted_version` (the attempted durable save), `current_version`/`version` (current
+TOML authority) and `active_version` (actually ready runtime). `applied` refers to the
+latest successful apply and becomes true only after readiness. Version digests describe
+TOML bytes, not secret changes. A credential-only rollback can leave all three digests
+equal while the latest attempt reports saved:false/applied:false and old ready:true.
+The GUI follows this state and displays connect, recovery, applied or failed outcome.
+Bodyless status/authorization reads preserve their HTTP keepalive connection even when
+Node completes parsing after the synchronous response handler. Declared unread,
+oversized or aborted bodies are still retired; disconnect cancellation and request
+bounds remain in force. On response loss or an
+empty/nonJSON error, read the existing version/status before deciding what to do;
+never automatically re-POST. A502/reset does not prove that nothing was saved.
+
+With B=`timeout_ms` (default30000ms), each replacement/restore connect+ready attempt
+has total B in addition to existing per-I/O deadlines. Retirement's outcome-reporting
+budget R=B+1000ms includes the existing WebSocket grace. Normal status budget is R+B
+plus measured local persistence; successful recovery at most2R+2B plus persistence;
+full failed/recovered reporting at most3R+2B plus persistence (default153000ms). There
+is one recovery attempt, no automatic loop. If true cancellation retirement exceeds
+R, state becomes failed_draining and all mutations stay blocked; Store/key/lease are
+retained until actual settlement, never forcibly released to satisfy reporting time.
+Matrix draft verification/listing also has total B; its response socket allows that
+bounded operation, while saved settings no longer await native connect in HTTP.
+
+Failed apply attempts restore previous TOML/vault/runtime when possible. The original
+accepted version remains visible alongside restored current/active versions and
+`failed_recovered`; the earlier saved acknowledgement is not rewritten as never saved,
+and old readiness is not called applied for the new version. If restore fails,
+authenticated settings remain available without claiming a ready runtime. Atomic TOML
+and vault transactions remain separate resources: crashes can leave a durable config
+whose native readiness is unestablished. On reopen validate the authoritative state
+normally; no persistent operation registry or configuration mirror is introduced.
+Back up TOML/vault/external key together while stopped. Never reset the database/key
+to recover a connection failure.
+
+Minimal structured `settings_stage` events contain operation/version, stage,
+elapsed_ms and safe outcome only. They contain no credentials, headers, URLs, room or
+message IDs. Native SDK request logging remains quiet. These events classify slow
+validation/drain/persist/connect/recovery without inventing a cause for the earlier
+production Matrix latency or original live save outcome, both still unknown.
 
 Cancel discards a draft. Pause removes agent access and cancels ineligible queued
 wakes during admission rechecks. Unbind revokes that connection's scopes without
@@ -110,12 +154,11 @@ Generation, scanning, adding and granting are separate events. The UI cannot
 confirm adding, and never grants agent access from a QR action. Host allowlisting
 checks URL form; it cannot independently attest a pasted link's target identity.
 
-The official [QQ documentation](https://github.com/tencent-connect/bot-docs/blob/main/docs/README.md)
-describes profile sharing. It does not establish an App ID URL formula. The
-inspected Satori QQ 4.14 and official Node SDK 1.0.5 do not establish a public
-`generate_url_link` contract; community endpoint names are not used as an API.
-This implementation therefore labels the manual source and supports a genuine
-operator-provided link instead of guessing a URL or enrolling credentials by QR.
+Configured-bot share links and scan credential authorization are separate actions.
+The latter uses the published
+[@tencent-connect/qqbot-connector1.2.0 public callback API](https://www.npmjs.com/package/@tencent-connect/qqbot-connector?activeTab=readme),
+not a guessed App ID URL or personal QQ protocol. See dependency provenance and the
+Node24 native-request ownership qualification in [dependencies](dependencies.md).
 
 Development uses Node 24 and npm:
 
@@ -154,3 +197,7 @@ are not used. Component provenance/license and font provenance ship in the stati
 bundle. Backend tests use owned SDK fixtures and receiver endpoints. Real QQ/Matrix
 account permissions and actual third-party add behavior require later operator
 acceptance; no live account, deployment or installed service is involved.
+
+If a newly verified account fails later during startup, rollback preserves its immutable identity and conversation pins. Discarding the wizard or reloading does not delete those pins. A subsequent successful Matrix identity check or QQ credential authorization can recover the original account ID only when that ID is absent from the current configuration. Candidates reuse existing conversation IDs. Configured accounts must be selected explicitly and retain their identity, homeserver and credential reference guards. Recovery does not restore grants, attach historical vault references, issue tokens or reveal secrets: supply a current credential and explicitly save the desired scope again. The submitted wizard draft remains available through terminal apply failure; success or explicit cancellation clears its credentials.
+
+The exact Matrix44 vendor patch also prevents late SDK startup and capability/keepalive polling after cancellation. It preserves the original timeoutSignal hunk and all native deadlines. Native body retirement remains owned by Post; cancelled-start public-SDK and application probes must exit naturally before cleanup is accepted. See `docs/dependencies.md` for the patch boundary.

@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { createServer } from "node:net";
 import { stringify } from "smol-toml";
 import { platformsFixture } from "./fixtures/platforms";
-import { stateFixture } from "./fixtures/state";
+import { stateFixture, until } from "./fixtures/state";
 import { processFixture } from "./fixtures/process";
 import { Store } from "../src/store";
 import { Settings } from "../src/settings";
@@ -129,11 +129,19 @@ test("extracted CLI retains authenticated management after rejected persisted cr
         }),
       })
     ).json();
-    expect(saved.applied).toBe(true);
     expect(saved.saved).toBe(true);
-    expect(saved.state).toBe("applied");
-    expect(saved.accounts[0].ready).toBe(true);
-    expect((await fetch(saved.machine_url + "/healthz")).status).toBe(200);
+    expect(saved.applied).toBe(false);
+    await until(
+      async () =>
+        (await (await fetch(origin + "/api/status", { headers })).json())
+          .applied,
+    );
+    const applied = await (
+      await fetch(origin + "/api/settings", { headers })
+    ).json();
+    expect(applied.state).toBe("applied");
+    expect(applied.accounts[0].ready).toBe(true);
+    expect((await fetch(applied.machine_url + "/healthz")).status).toBe(200);
     expect(await readFile(leasePath, "utf8")).toBe(lease);
     expect(
       JSON.stringify({
@@ -184,7 +192,10 @@ test("settings native failure retains the same Store for retry; missing vault cr
         },
       ],
     });
-    expect(saved.applied).toBe(true);
+    expect(saved.saved).toBe(true);
+    expect(saved.applied).toBe(false);
+    await app.pending;
+    expect(app.status().applied).toBe(true);
     expect(app.store).toBe(owner);
     expect(owner.owner.closed).toBe(false);
     await app.stop();
