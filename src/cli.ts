@@ -4,8 +4,12 @@ import { fileTypeFromBuffer } from "file-type";
 import { loadConfig, privateFile } from "./config";
 import { Store } from "./store";
 import { Application } from "./runtime";
+import { Settings } from "./settings";
+import { serveSettings } from "./management";
+import { provisionAdmin } from "./admin";
 const help = `Lamplit Post v1 (Node 24)
 post <command> --config FILE
+  admin-provision   Read administrator password from stdin (12+ characters), offline
   config-check      Validate one Post TOML document without creating state
   credential-put --ref REF --account ID --kind platform|receiver
                     Read secret from stdin; store authenticated ciphertext offline
@@ -38,6 +42,7 @@ export async function main(argv = process.argv.slice(2)) {
     "config-check": ["config"],
     serve: ["config"],
     status: ["config"],
+    "admin-provision": ["config"],
     "credential-put": ["config", "ref", "account", "kind"],
     "token-issue": ["config", "agent"],
     "token-revoke": ["config", "agent"],
@@ -97,13 +102,38 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify({ valid: true }));
     return;
   }
+  if (command === "admin-provision") {
+    if (!config.settings || process.stdin.isTTY)
+      throw new Error("Settings/stdin required");
+    const store = await Store.open(config);
+    try {
+      let password = "";
+      for await (const chunk of process.stdin) {
+        password += chunk.toString();
+        if (password.length > 1024) throw new Error("Password length");
+      }
+      await provisionAdmin(config.settings.admin_file, password.trim());
+      console.log(JSON.stringify({ provisioned: true }));
+    } finally {
+      await store.close();
+    }
+    return;
+  }
   if (command === "serve") {
     process.umask(0o077);
-    const app = new Application(config);
+    const app = config.settings
+      ? new Settings(v.config, config)
+      : new Application(config);
+    let management: Awaited<ReturnType<typeof serveSettings>> | undefined;
+    const retire = async () => {
+      const managementStopped = management?.stop();
+      await app.stop();
+      await managementStopped;
+    };
     let stopping = false;
     const stop = () => {
       stopping = true;
-      void app.stop().catch(() => {
+      void retire().catch(() => {
         process.exitCode = 1;
       });
     };
@@ -111,16 +141,23 @@ export async function main(argv = process.argv.slice(2)) {
     process.once("SIGTERM", stop);
     try {
       await app.start();
-      if (!stopping)
+      if (app instanceof Settings && !stopping)
+        management = await serveSettings(app);
+      if (stopping) await retire();
+      if (!stopping) {
+        const runtime = app instanceof Settings ? app.app : app;
+        const status = await runtime.service!.status();
         console.log(
           JSON.stringify({
-            ready: true,
-            url: app.http!.url,
-            status: await app.service!.status(),
+            ready: !!runtime.http && status.healthy,
+            ...(management ? { settings_ready: true } : {}),
+            url: runtime.http?.url ?? null,
+            status,
           }),
         );
+      }
     } catch (e) {
-      await app.stop();
+      await retire();
       process.removeListener("SIGINT", stop);
       process.removeListener("SIGTERM", stop);
       if (!stopping) throw e;

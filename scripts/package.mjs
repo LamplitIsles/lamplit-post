@@ -28,8 +28,11 @@ for (const path of [
   "LICENSE",
 ])
   await cp(path, target + "/" + path, { recursive: true });
+await mkdir(target + "/web");
+await cp("web/package.json", target + "/web/package.json");
 await mkdir(target + "/dist");
 await cp("dist/cli.cjs", target + "/dist/cli.cjs");
+await cp("dist/web", target + "/dist/web", { recursive: true });
 await cp("examples/post.toml", target + "/post.toml");
 execFileSync(
   "npm",

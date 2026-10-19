@@ -186,7 +186,7 @@ export class Store {
     for (const [agent, hash] of this.tokens)
       if (
         hash === value &&
-        this.config.bindings.some((b) => b.agent_id === agent)
+        this.config.bindings.some((b) => b.agent_id === agent && b.enabled)
       )
         return agent;
   }

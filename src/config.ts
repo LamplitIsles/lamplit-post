@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 const id = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
 const ref = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
-const url = z
+export const url = z
   .string()
   .url()
   .refine((s) => {
@@ -17,6 +17,23 @@ const url = z
       !u.search
     );
   });
+export function isShareURL(value: string) {
+  try {
+    const u = new URL(value);
+    return (
+      value.length <= 2048 &&
+      u.protocol === "https:" &&
+      ["qun.qq.com", "bot.q.qq.com", "q.qq.com"].includes(u.hostname) &&
+      !u.username &&
+      !u.password &&
+      !u.hash &&
+      (!u.port || u.port === "443") &&
+      !/secret|token|password|credential/i.test(u.href)
+    );
+  } catch {
+    return false;
+  }
+}
 const scope = z
   .object({
     account_id: id,
@@ -40,6 +57,14 @@ export const ConfigSchema = z
       .default(16 * 1024 * 1024),
     timeout_ms: z.number().int().min(50).max(120000).default(30000),
     backlog_limit: z.number().int().positive().default(10000),
+    settings: z
+      .object({
+        port: z.number().int().min(0).max(65535).default(5140),
+        origin: url,
+        admin_file: z.string().min(1),
+      })
+      .strict()
+      .optional(),
     accounts: z.array(
       z
         .object({
@@ -48,6 +73,8 @@ export const ConfigSchema = z
           credential: ref,
           native_id: z.string().min(1),
           homeserver: url.optional(),
+          name: z.string().min(1).max(128).optional(),
+          share_url: z.string().refine(isShareURL).optional(),
         })
         .strict()
         .superRefine((v, c) => {
@@ -63,9 +90,11 @@ export const ConfigSchema = z
         .object({
           id,
           agent_id: id,
+          name: z.string().min(1).max(128).optional(),
+          enabled: z.boolean().default(true),
           receiver_url: url,
           receiver_credential: ref,
-          scopes: z.array(scope).min(1),
+          scopes: z.array(scope),
           wake: z
             .object({
               direct: z.boolean().default(false),
@@ -80,6 +109,25 @@ export const ConfigSchema = z
   })
   .strict()
   .superRefine((v, c) => {
+    if (v.settings) {
+      const origin = new URL(v.settings.origin);
+      if (
+        origin.origin !== v.settings.origin ||
+        !(
+          origin.protocol === "https:" ||
+          (origin.protocol === "http:" && origin.hostname === "127.0.0.1")
+        )
+      )
+        c.addIssue({
+          code: "custom",
+          message: "Settings require a canonical HTTPS or loopback origin",
+        });
+      if (v.settings.admin_file === v.master_key_file)
+        c.addIssue({
+          code: "custom",
+          message: "Administrator credential must be independent",
+        });
+    }
     for (const items of [v.accounts, v.bindings])
       if (new Set(items.map((x) => x.id)).size !== items.length)
         c.addIssue({ code: "custom", message: "Duplicate ID" });
@@ -142,12 +190,29 @@ export function resolveConfigPaths(raw: Config, base: string): Config {
     ...raw,
     data_dir: resolve(base, raw.data_dir),
     master_key_file: resolve(base, raw.master_key_file),
+    ...(raw.settings
+      ? {
+          settings: {
+            ...raw.settings,
+            admin_file: resolve(base, raw.settings.admin_file),
+          },
+        }
+      : {}),
   };
   if (
     cfg.master_key_file === cfg.data_dir ||
     cfg.master_key_file.startsWith(cfg.data_dir + "/")
   )
     throw new Error("Master key must be outside data directory");
+  if (
+    cfg.settings &&
+    (cfg.settings.admin_file === cfg.master_key_file ||
+      cfg.settings.admin_file === cfg.data_dir ||
+      cfg.settings.admin_file.startsWith(cfg.data_dir + "/"))
+  )
+    throw new Error(
+      "Administrator credentials must be outside data and independent of key/config",
+    );
   return cfg;
 }
 export async function loadConfig(path: string) {
@@ -160,10 +225,13 @@ export async function loadConfig(path: string) {
     permissions.mode & 0o022
   )
     throw new Error("Config must not be writable by group/others");
-  return resolveConfigPaths(
+  const config = resolveConfigPaths(
     parseConfig(parse(await readFile(path, "utf8"))),
     dirname(resolve(path)),
   );
+  if (config.settings?.admin_file === resolve(path))
+    throw new Error("Independent administrator file required");
+  return config;
 }
 export async function privateFile(path: string) {
   const s = await stat(path);

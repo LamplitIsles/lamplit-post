@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { opaque } from "../../src/store";
 /** Real SDK/adapter traffic terminates on owned loopback HTTP/WS only. */
-export async function platformsFixture() {
+export async function platformsFixture(matrixIdentity = "@post:fixture") {
   const calls: {
     method: string;
     path: string;
@@ -19,6 +19,7 @@ export async function platformsFixture() {
   let syncCount = 0,
     sequence = 0;
   let stopped = false;
+  let matrixCredential: string | undefined;
   let permission = false,
     tokenStall = false,
     failureStatus = 500;
@@ -152,7 +153,11 @@ export async function platformsFixture() {
       );
     if (path.endsWith("/versions"))
       return json({ versions: ["v1.11"], unstable_features: {} });
-    if (path.endsWith("/whoami")) return json({ user_id: "@post:fixture" });
+    if (path.endsWith("/whoami"))
+      return matrixCredential !== undefined &&
+        req.headers.get("authorization") !== `Bearer ${matrixCredential}`
+        ? json({ errcode: "M_UNKNOWN_TOKEN" }, 401)
+        : json({ user_id: matrixIdentity });
     if (path.endsWith("/joined_rooms"))
       return json({
         joined_rooms: joined ? ["!room:fixture", "!dm:fixture"] : [],
@@ -218,8 +223,8 @@ export async function platformsFixture() {
                 events: [
                   {
                     type: "m.room.member",
-                    state_key: "@post:fixture",
-                    sender: "@post:fixture",
+                    state_key: matrixIdentity,
+                    sender: matrixIdentity,
                     content: { membership: "join" },
                     event_id: "$member",
                     origin_server_ts: 1,
@@ -254,6 +259,9 @@ export async function platformsFixture() {
   });
   return {
     calls,
+    matrixCredential(value: string) {
+      matrixCredential = value;
+    },
     media,
     planSync(handler: (req: Request) => Promise<Response> | Response) {
       syncPlan.push(handler);

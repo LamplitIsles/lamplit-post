@@ -333,6 +333,14 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
       "Owned artifact failure diagnostic",
       JSON.stringify({
         stage,
+        receiverAttempts: receiver.attempts.length,
+        captured: await client
+          ?.callTool({
+            name: "read_messages",
+            arguments: { account_id: "qq-main", conversation_id: "qq-group" },
+          })
+          .then((r) => r.structuredContent)
+          .catch(() => null),
         pendingOutcome,
         platformPaths: p.calls.map((call) => call.path),
         sends: p.sendCount,

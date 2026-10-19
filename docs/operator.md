@@ -4,8 +4,9 @@ Use Node 24. Extract the complete reviewed archive into a new private directory.
 Record `revision.json`, `artifact-manifest.json` and archive SHA256. A dirty-tree
 artifact is development evidence. Do not extract over an initialized installation.
 
-This artifact runs a headless backend. There is no browser administration,
-plugin market, supervisor, administrator account or online configuration service.
+This artifact runs a headless backend by default. Optional authenticated
+[agent settings](settings.md) serve a local static UI with a separately provisioned
+administrator. There is no plugin market or supervisor.
 The current deployed managed app/unit is a different artifact and requires a
 later explicit operator handoff. Do not point this artifact at its database or
 replace its configuration/key. Merge alone does not deploy anything.
@@ -58,8 +59,11 @@ node /opt/post/dist/cli.cjs token-revoke --config /etc/post/post.toml --agent cf
 
 Status and offline mutations refuse the serving lease. During serve, `/healthz`
 exposes safe readiness/backlog categories. MCP and assets require the agent
-Bearer on every request. The CLI prints readiness only after SDK startup and
-listener binding. SIGINT/SIGTERM abort and drain actual I/O before releasing
+Bearer on every request. The CLI reports `ready: true` only after SDK startup,
+machine listener binding and a healthy runtime. Opt-in management availability
+is reported separately as `settings_ready: true`; native startup failure can
+leave settings available with `ready: false` and a null machine URL.
+SIGINT/SIGTERM abort and drain actual I/O before releasing
 the database/key lease. Startup never installs dependencies or downloads code.
 The [service template](../deploy/lamplit-post.service) is inert until an operator
 selects paths/user and explicitly installs it.
@@ -68,7 +72,8 @@ selects paths/user and explicitly installs it.
 owner or persisted identity mismatch. `unavailable` includes vault authentication
 failure. Inspect the owner before stale-lock recovery; never delete a key/database
 to make startup succeed. Raw upstream errors/messages are intentionally absent
-from logs. Reconfigure only while stopped and validate before restarting.
+from logs. Headless file edits require a stopped process and validation before restart.
+Opt-in settings serialize and validate protected saves before controlled apply.
 
 Asset helper:
 

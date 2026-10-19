@@ -170,6 +170,35 @@ export class MatrixUserBot
       }
     });
   }
+  async discover(signal: AbortSignal) {
+    return this.operations.run(signal, async () => {
+      const joined = await this.client.getJoinedRooms();
+      const items = [];
+      for (const native_id of joined.joined_rooms.slice(0, 100)) {
+        signal.throwIfAborted();
+        const state = await this.client.roomState(native_id);
+        const encrypted = state.some(
+          (e: any) => e.type === "m.room.encryption",
+        );
+        const name = state.find((e: any) => e.type === "m.room.name")?.content
+          ?.name;
+        const existing = this.service.store.db
+          .prepare(
+            "SELECT id,type FROM conversations WHERE account=? AND native=?",
+          )
+          .get(this.config.id, native_id);
+        items.push({
+          native_id,
+          name: typeof name === "string" ? name.slice(0, 256) : native_id,
+          conversation_id: existing?.id ?? opaque("c"),
+          type: existing?.type ?? "group",
+          source: "platform",
+          encrypted,
+        });
+      }
+      return items;
+    });
+  }
   async members(scope: Scope, signal: AbortSignal) {
     try {
       const roster = await this.operations.run(signal, () =>

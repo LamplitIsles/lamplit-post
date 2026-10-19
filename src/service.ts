@@ -72,7 +72,9 @@ export class Service {
   }
   bindings(agent: string) {
     need(this.active(agent));
-    const bindings = this.config.bindings.filter((b) => b.agent_id === agent);
+    const bindings = this.config.bindings.filter(
+      (b) => b.agent_id === agent && b.enabled,
+    );
     need(bindings.length);
     return bindings;
   }
@@ -102,6 +104,7 @@ export class Service {
         s.conversation_id === m.conversation.id,
     );
     return (
+      b.enabled &&
       !!s &&
       this.admitsConversation(s) &&
       (s.type === "group" ||

@@ -11,26 +11,34 @@ export class Application {
   service?: Service;
   host?: Host;
   http?: Awaited<ReturnType<typeof serve>>;
+  transportFailed = false;
   private starting?: Promise<void>;
   private stopping?: Promise<void>;
   private stopped = false;
   constructor(
     public config: Config,
     public fixture?: TransportFixture,
+    existingStore?: Store,
   ) {
+    this.store = existingStore;
     // Upstream SDK errors may contain credentials or message payloads.
     Logger.targets = [];
   }
   start() {
     return (this.starting ??= (async () => {
       if (this.stopped) throw new Error("Application stopped");
-      this.store = await Store.open(this.config);
+      this.store ??= await Store.open(this.config);
       this.checkStarting();
       this.service = new Service(this.store);
       this.checkStarting();
       this.host = new Host(this.service, this.fixture, this.context);
       const connecting = this.host.start();
-      await Promise.all([this.context.start(), connecting]);
+      try {
+        await Promise.all([this.context.start(), connecting]);
+      } catch (error) {
+        this.transportFailed = true;
+        throw error;
+      }
       this.checkStarting();
       await this.service.startDispatch();
       this.checkStarting();
@@ -41,7 +49,7 @@ export class Application {
   private checkStarting() {
     if (this.stopped) throw new Error("Application stopped");
   }
-  stop() {
+  stop(closeStore = true) {
     this.stopped = true;
     return (this.stopping ??= (async () => {
       const domainStopped = this.service?.stop();
@@ -54,7 +62,7 @@ export class Application {
       await this.service?.stop();
       await this.host?.stop();
       await this.context.stop();
-      await this.store?.close();
+      if (closeStore) await this.store?.close();
     })());
   }
 }

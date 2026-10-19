@@ -11,14 +11,16 @@ node dist/cli.cjs config-check --config examples/post.toml
 
 Post runs directly on Node 24. Satori/Cordis hosts the published QQ adapter;
 Matrix uses the account access-token SDK. Post owns one SQLite connection,
-a sealed credential vault, and one strict TOML configuration. There is no
-management UI or human login in this backend.
+a sealed credential vault, and one strict TOML configuration. Opt-in
+[authenticated settings](docs/settings.md) add an agent-first browser UI; the
+backend runs headlessly by default.
 
 Start with the [operator guide](docs/operator.md) and
 [example configuration](examples/post.toml). Native identities must be verified
 by the operator before connecting accounts. Secrets enter the vault through
 stdin, independently of agent Bearer tokens and receiver credentials.
-Help and config checks create no state. Configuration changes apply on restart.
+Help and config checks create no state. Offline file changes apply on restart;
+protected settings saves wait for controlled apply.
 
 The [consumer contract](contracts/v1/README.md),
 [executable schemas](contracts/v1/index.ts) and
@@ -48,7 +50,12 @@ framework database is unsupported and refused; no conversion or reset is provide
 The existing installed managed service stays untouched until a separately planned
 operator transition. Building or merging does not deploy.
 
-Settings UI is deferred. Matrix AS/E2EE, FTS and MCP Events are outside this
+Matrix AS/E2EE, FTS and MCP Events are outside this
 backend. Audio/video remain ordinary attachments.
 
 Post is licensed under [AGPL-3.0](LICENSE); dependencies retain their own licenses.
+
+Optional [authenticated agent settings](docs/settings.md) provide the real Svelte 5
+UI on loopback port 5140. Provision the independent administrator offline first.
+Headless operation remains the default; enabling settings does not deploy or
+replace any existing installation.

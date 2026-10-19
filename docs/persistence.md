@@ -30,3 +30,7 @@ Native FULL sync-path and SIGKILL tests establish process-crash durability and
 actual host sync calls; they do not simulate power loss or guarantee hardware
 behavior. Shutdown drains HTTP/platform/domain I/O, disposes Cordis, closes SQLite
 and only then releases the lease and wipes the in-memory key.
+
+Optional settings retain this same connection/key/lease during controlled adapter
+replacement. No management config tables or second writer are introduced; TOML
+remains authoritative. See [settings](settings.md) for save/apply failure recovery.

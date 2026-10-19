@@ -58,14 +58,17 @@ export function processFixture(
     phase(value: string) {
       phase = value;
     },
-    async ready() {
+    settingsReady() {
+      return this.ready("settings_ready");
+    },
+    async ready(field: "ready" | "settings_ready" = "ready") {
       let value: any;
       try {
         await until(() => {
           for (const line of out.split("\n"))
             try {
               const v = JSON.parse(line);
-              if (v.ready) value = v;
+              if (v[field]) value = v;
             } catch {}
           if (!value && exit)
             throw new Error(

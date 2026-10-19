@@ -1,5 +1,6 @@
 import { build } from "esbuild";
-import { readFile, mkdir } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { readFile, mkdir, cp } from "node:fs/promises";
 const pkg = JSON.parse(await readFile("package.json", "utf8"));
 await mkdir("dist", { recursive: true });
 await build({
@@ -13,3 +14,6 @@ await build({
   external: Object.keys(pkg.dependencies),
   loader: { ".sql": "text" },
 });
+
+execFileSync("npm", ["run", "build", "--prefix", "web"], { stdio: "inherit" });
+await cp("assets/brand", "dist/web/brand", { recursive: true });
