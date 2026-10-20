@@ -1,8 +1,8 @@
 import { test, expect } from "vitest";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { stringify, parse } from "smol-toml";
 import { platformsFixture } from "./fixtures/platforms";
@@ -36,7 +36,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       ],
       bindings: state.config.bindings.map((binding) => ({
         ...binding,
-        account_ids: ["matrix-main"],
+        account_ids: ["matrix-main", "matrix-second"],
         scopes: binding.scopes.filter((s) => s.account_id === "matrix-main"),
       })),
       settings: {
@@ -210,7 +210,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       await evaluate("window.__ownedSaves=[];true");
       await click("编辑绑定");
       await browser(["fill", "#credential", replacementA]);
-      await browser(["find", "text", "Account B", "click", "--exact"]);
+      await browser(["find", "role", "button", "click", "--name", "Account B"]);
       expect(
         await evaluate(
           "document.querySelector('#credential').value.length === 0",
@@ -218,7 +218,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       ).toBe(true);
       // Same selection preserves a draft; switching to a different identity clears it.
       await browser(["fill", "#credential", replacementA]);
-      await browser(["find", "text", "Account B", "click", "--exact"]);
+      await browser(["find", "role", "button", "click", "--name", "Account B"]);
       expect(
         await evaluate(
           `document.querySelector('#credential').value === ${JSON.stringify(replacementA)}`,
@@ -230,7 +230,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
           "document.querySelector('#credential').value.length === 0",
         ),
       ).toBe(true);
-      await browser(["find", "text", "Account B", "click", "--exact"]);
+      await browser(["find", "role", "button", "click", "--name", "Account B"]);
       await click("下一步");
       await click("下一步");
       await click("下一步");
@@ -276,11 +276,15 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
           "!!window.__ownedTokenA && !document.querySelector('#once')",
         ),
       ).toBe(true);
-      if (process.env.POST_BROWSER_EVIDENCE)
+      if (process.env.POST_BROWSER_EVIDENCE) {
+        await mkdir(dirname(resolve(process.env.POST_BROWSER_EVIDENCE)), {
+          recursive: true,
+        });
         await browser([
           "screenshot",
           resolve(process.env.POST_BROWSER_EVIDENCE),
         ]);
+      }
       if (process.env.POST_BROWSER_EVIDENCE) {
         await browser(["set", "viewport", "390", "844"]);
         expect(

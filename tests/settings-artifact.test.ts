@@ -129,7 +129,7 @@ test("extracted artifact provisions separate admin, serves complete local UI, ap
     serving = run(["serve", "--config", path]);
     await serving.ready();
     expect((await fetch(origin + "/api/settings", { headers })).status).toBe(
-      401,
+      200,
     );
     const newLogin = await fetch(origin + "/api/login", {
       method: "POST",

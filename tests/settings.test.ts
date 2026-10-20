@@ -94,7 +94,7 @@ test("real management login, persisted empty registration, stale/CSRF/channel re
     await f.close();
   }
 });
-test("SDK configuration restart preserves owner, pins, unknown sends, shared independent ACL and paused delivery", async () => {
+test("SDK configuration restart preserves exclusive owner, pins, unknown sends, same-owner binding ACL and paused delivery", async () => {
   const f = await settingsFixture();
   try {
     await f.login();
@@ -127,7 +127,7 @@ test("SDK configuration restart preserves owner, pins, unknown sends, shared ind
     update.bindings.push({
       ...structuredClone(update.bindings[0]),
       id: "second",
-      agent_id: "second",
+      agent_id: "cfl",
 
       enabled: true,
       scopes: [update.bindings[0].scopes[0]],
@@ -153,14 +153,14 @@ test("SDK configuration restart preserves owner, pins, unknown sends, shared ind
     expect(response.applied).toBe(true);
     await store.issue("second");
     await expect(
-      f.app.app.service!.call("cfl", "read_messages", {
+      f.app.app.service!.call("second", "read_messages", {
         account_id: "qq-main",
         conversation_id: "qq-group",
       }),
     ).rejects.toThrow();
     expect(
       (
-        (await f.app.app.service!.call("second", "read_messages", {
+        (await f.app.app.service!.call("cfl", "read_messages", {
           account_id: "qq-main",
           conversation_id: "qq-group",
         })) as any
@@ -235,6 +235,7 @@ test("failed SDK readiness restores TOML and sealed credentials, then retry appl
       credential: "wrong-platform",
       homeserver: f.platform.url,
     });
+    initial.bindings[0].account_ids.push("wrong-matrix");
     const saved = await (
       await f.apply("settings", {
         ...initial,
@@ -353,7 +354,7 @@ test("bounded bodies, host checks, login throttling, finite sessions and immutab
       "owned-fixture-password",
     );
     expect(token).toBeTruthy();
-    admin.sessions.get(token!)!.expires = 0;
+    admin.session(token!)!.expires = 0;
     expect(admin.session(token!)).toBeUndefined();
     expect(
       (await f.request("login", { password: "x".repeat(140000) })).status,

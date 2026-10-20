@@ -1,3 +1,4 @@
+import { qqInbound } from "./diagnostics";
 import { boundedBytes } from "./io";
 import { HTTP } from "@cordisjs/plugin-http";
 import { Context, h } from "@satorijs/core";
@@ -168,7 +169,7 @@ export class Host {
     }
   }
 }
-class QQPlatform implements Platform {
+export class QQPlatform implements Platform {
   get nativeUserId() {
     return this.bot.selfId;
   }
@@ -193,6 +194,8 @@ class QQPlatform implements Platform {
         bot.platform === "qq" &&
         (bot.config as any).id === config.native_id
       ) {
+        if (!this.service.closed && !this.service.store.owner.closed)
+          void this.service.track(this.service.status()).catch(() => {});
         if (bot.status === 1) this.startedAt = Date.now();
         else if (!this.stopped)
           void host.service
@@ -228,9 +231,41 @@ class QQPlatform implements Platform {
   async members(_scope: Scope, _signal: AbortSignal) {
     return { items: [], capability: "unsupported" as const };
   }
+  async groupName(native: string, signal: AbortSignal) {
+    signal.throwIfAborted();
+    const guild = await this.host.operations.run(signal, () =>
+      this.bot.getGuild(native),
+    );
+    signal.throwIfAborted();
+    return guild.id === native && typeof guild.name === "string"
+      ? guild.name.trim().slice(0, 256) || undefined
+      : undefined;
+  }
   enqueue(session: any) {
-    if (this.stopped) return;
+    const type = session.isDirect ? "direct" : "group";
+    const event = session.qq?.t;
+    const native_event =
+      event === "GROUP_MESSAGE_CREATE" ||
+      event === "GROUP_AT_MESSAGE_CREATE" ||
+      event === "C2C_MESSAGE_CREATE"
+        ? event
+        : "other";
+    if (this.stopped) {
+      qqInbound({
+        stage: "sdk_capture",
+        type,
+        native_event,
+        category: "stopped",
+      });
+      return;
+    }
     if (++this.pending > 100) {
+      qqInbound({
+        stage: "sdk_capture",
+        type,
+        native_event,
+        category: "capacity",
+      });
       this.service.errors.set(this.config.id, "capture_capacity");
       void this.service
         .track(this.service.store.gap(this.config.id, "capture_capacity"))
@@ -238,9 +273,16 @@ class QQPlatform implements Platform {
       void this.stop();
       return;
     }
+    qqInbound({ stage: "sdk_capture", type, native_event, category: "queued" });
     this.chain = this.chain
       .then(() => this.capture(session))
       .catch(() => {
+        qqInbound({
+          stage: "sdk_capture",
+          type,
+          native_event,
+          category: "capture_failed",
+        });
         this.service.errors.set(this.config.id, "capture_stopped");
         void this.bot.stop();
       })

@@ -136,7 +136,7 @@ test("registered zero-binding identity lists zero accounts over actual MCP witho
   }
 });
 
-test("fully paused HTTP/upload denial remains, removing last binding preserves identity but denies assets and other-agent access", async () => {
+test("fully paused HTTP/upload denial remains, clearing grants preserves ownership but denies assets and other-agent access", async () => {
   const f = await settingsFixture();
   try {
     await f.login();
@@ -176,7 +176,11 @@ test("fully paused HTTP/upload denial remains, removing last binding preserves i
     expect((await m.upload()).status).toBe(401);
     expect((await m.request("/assets/" + asset.asset_id)).status).toBe(401);
     const removed = proposal(await f.app.view());
-    removed.bindings = [];
+    removed.bindings = removed.bindings.map((b: any) => ({
+      ...b,
+      enabled: true,
+      scopes: [],
+    }));
     await f.apply("settings", removed);
     const listing = await m.call("list_accounts");
     expect(listing.status).toBe(200);

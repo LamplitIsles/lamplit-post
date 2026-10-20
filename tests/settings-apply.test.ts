@@ -84,6 +84,22 @@ test("11500ms real SDK reply has fast durable ack, nonblocking status, fail-fast
         credential: "slow-secret",
       },
     ];
+    v.agents = [
+      {
+        id: "cfl",
+        receiver_url: f.receiver.url,
+        receiver_credential: "receiver-secret",
+      },
+    ];
+    v.bindings = [
+      {
+        id: "slow-owner",
+        agent_id: "cfl",
+        account_ids: ["slow"],
+        scopes: [],
+        wake: {},
+      },
+    ];
     f.platform.delayWhoami(11500);
     const start = performance.now();
     const response = await f.request("settings", {
@@ -196,6 +212,22 @@ test("total connect budget spans multiple individually-valid reads, restores pri
         native_id: "@post:fixture",
         homeserver: f.platform.url,
         credential: "deadline-secret",
+      },
+    ];
+    v.agents = [
+      {
+        id: "cfl",
+        receiver_url: f.receiver.url,
+        receiver_credential: "receiver-secret",
+      },
+    ];
+    v.bindings = [
+      {
+        id: "deadline-owner",
+        agent_id: "cfl",
+        account_ids: ["deadline"],
+        scopes: [],
+        wake: {},
       },
     ];
     const ack = await (

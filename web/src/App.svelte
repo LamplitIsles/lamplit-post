@@ -97,6 +97,7 @@
   let register = $state(false),
     registration = $state({ id: "", name: "", receiver_url: "" }),
     registrationSecret = $state("");
+  let accountRemoval = $state(null);
   let removal = $state(null),
     qr = $state(null),
     share = $state(""),
@@ -109,7 +110,41 @@
   let connection = $state(null),
     connectionSecret = $state("");
   const bindings = $derived(state.bindings.filter((b) => b.agent_id === agent));
+  const ownedAccounts = $derived(
+    state.accounts.filter((a) =>
+      bindings.some((b) => b.account_ids.includes(a.id)),
+    ),
+  );
   const copy = (o) => JSON.parse(JSON.stringify(o));
+  function chatType(chat) {
+    if (chat.type === "direct") return "私聊";
+    return (state.accounts.find((a) => a.id === chat.account_id)?.platform ||
+      selected?.platform) === "qq"
+      ? "群聊"
+      : "群聊 / 房间";
+  }
+  function chatName(chat) {
+    const platform = state.accounts.find((a) => a.id === chat.account_id)?.platform ||
+      selected?.platform;
+    if (chat.name?.trim() && (platform !== "qq" || chat.name !== chat.native_id))
+      return chat.name;
+    return platform === "qq" ? `${chatType(chat)}（名称不可用）` : chat.native_id;
+  }
+  const qqDirect = (s) =>
+    s.type === "direct" &&
+    (state.accounts.find((a) => a.id === s.account_id)?.platform ||
+      selected?.platform) === "qq";
+  const scopeAuthorized = (s) =>
+    s.type === "group" ||
+    (qqDirect(s) ? s.senders.includes(s.native_id) : s.senders.length > 0);
+  const observedContact = (c) =>
+    selected?.platform === "qq" && c.type === "direct" &&
+    (c.source === "observed" || c.source === "platform");
+  const knownContact = (s) =>
+    candidates.some((c) => observedContact(c) &&
+      c.conversation_id === s.conversation_id && c.native_id === s.native_id);
+  const scopeLabel = (s) =>
+    `${chatName(s)}（${chatType(s)}${scopeAuthorized(s) ? "" : " · 未授权"}）`;
   const cleanAccount = (a) => {
     const { hasCredential, ready, ...rest } = a;
     if (rest.name === "") delete rest.name;
@@ -436,7 +471,7 @@
               name:
                 typeof pin.name === "string" && pin.name.trim()
                   ? pin.name.trim().slice(0, 256)
-                  : scope.native_id,
+                  : selected.platform === "qq" ? undefined : scope.native_id,
             }
           : {}),
       };
@@ -562,6 +597,7 @@
         throw e;
       }
       candidates = result.items;
+      normalizeDraftId(selected.id, candidates);
       directoryState = candidates.length ? "ready" : "empty";
       discovery = "QQ 仅显示本机已观测或手动配置的聊天，不是完整目录。";
     });
@@ -573,7 +609,7 @@
       conversation_id: c.conversation_id || uid("chat"),
       native_id: c.native_id,
       type: c.type,
-      senders: [],
+      senders: observedContact(c) ? [c.native_id] : [],
     };
     draft.scopes = checked
       ? [...draft.scopes, scope]
@@ -765,9 +801,7 @@
           register = true;
         }}>＋ 注册 agent</Button
       >
-      <p class="sidebar-note">
-        同一账号可以供多个 agent 使用，聊天授权各自独立。
-      </p>
+      <p class="sidebar-note">各 agent 使用独立的账号，可连接多个 IM 账号。</p>
     </aside>
     <main>
       <div class="topline">
@@ -861,7 +895,7 @@
                       <Badge variant="secondary"
                         >{b.enabled
                           ? consumer?.hasToken
-                            ? b.scopes.some((s) => s.account_id === accountId)
+                            ? b.scopes.some((s) => s.account_id === accountId && scopeAuthorized(s))
                               ? "已授权聊天"
                               : "未授权聊天"
                             : "待连接消费者"
@@ -875,30 +909,10 @@
                 <dl>
                   <dt>聊天范围</dt>
                   <dd>
-                    {b.scopes
-                      .map(
-                        (s) =>
-                          (s.name || s.native_id) +
-                          "（" +
-                          (s.type === "direct" ? "私聊" : "群聊 / 房间") +
-                          "）",
-                      )
-                      .join("、")}
+                    {b.scopes.map(scopeLabel).join("、")}
                   </dd>
                   <dt>会唤醒</dt>
                   <dd>{wakeText(b.wake)}</dd>
-                  <dt>账号共享</dt>
-                  <dd>
-                    {state.bindings.some(
-                      (x) =>
-                        x.agent_id !== agent &&
-                        x.scopes.some((s) =>
-                          b.scopes.some((t) => s.account_id === t.account_id),
-                        ),
-                    )
-                      ? "其他 agent 也在使用，授权各自独立"
-                      : "目前仅此 agent 使用"}
-                  </dd>
                   <dt>平台标识</dt>
                   <dd>
                     {b.account_ids
@@ -935,18 +949,25 @@
                     size="sm"
                     onclick={() => {
                       removal = b;
-                    }}>解绑</Button
+                    }}>撤销聊天授权</Button
                   >{#each state.accounts.filter((a) => a.platform === "qq" && b.account_ids.includes(a.id)) as a}<Button
                       variant="ghost"
                       size="sm"
                       onclick={() => showQR(a)}>添加机器人</Button
+                    >{/each}
+                  {#each ownedAccounts.filter( (a) => b.account_ids.includes(a.id) ) as a}<Button
+                      variant="ghost"
+                      size="sm"
+                      onclick={() => {
+                        accountRemoval = a;
+                      }}>删除账号 {a.name || a.id}</Button
                     >{/each}
                 </div>
               </details>
             </article>
           {:else}<div class="empty">
               <h2>还没有授权聊天</h2>
-              <p>绑定已有账号或添加新账号，然后选择聊天范围。</p>
+              <p>添加此 agent 的账号，然后选择聊天范围。</p>
               <Button variant="outline" onclick={() => begin(bindings[0])}
                 >绑定第一个账号</Button
               >
@@ -1032,9 +1053,9 @@
     </ol>
     {#if draft}<div class="editor-body">
         {#if step === 0}<p class="hint">
-            共享账号不会复制其他 agent 的聊天授权。
+            此 agent 独立使用账号。保存账号后，再为它授权聊天。
           </p>
-          {#each state.accounts as a}<button
+          {#each ownedAccounts as a}<button
               class="account-choice"
               class:selected={selected?.id === a.id}
               onclick={() => choose(a)}
@@ -1129,7 +1150,7 @@
                       bind:value={selected.homeserver}
                     />
                   </div>{/if}{/if}{:else}<small
-                >已使用的账号身份不能修改。凭据替换会重新连接共享此账号的绑定。</small
+                >已使用的账号身份不能修改。凭据替换会重新连接此账号。</small
               >{/if}
             {#if selected.platform === "matrix" || !newAccount || manualQQ}<div
                 class="field"
@@ -1210,7 +1231,7 @@
               bind:value={search}
             />
           </div>
-          {#each candidates.filter((c) => (c.name + " " + c.native_id)
+          {#each candidates.filter((c) => ((c.name || "") + " " + c.native_id)
               .toLowerCase()
               .includes(search.toLowerCase())) as c}<div class="chat-row">
               <Checkbox
@@ -1225,8 +1246,8 @@
                 onCheckedChange={(checked) => toggle(c, checked)}
               /><label class="chat-label" for={"candidate-" + c.conversation_id}
                 ><span
-                  >{c.name || c.native_id}<small
-                    >{c.native_id} · {c.source === "platform"
+                  >{chatName(c)}<small
+                    >{c.native_id} · {chatType(c)} · {c.source === "platform"
                       ? "平台返回"
                       : c.source === "observed"
                         ? "已观测"
@@ -1242,10 +1263,8 @@
               class="chat-row"
             >
               <span class="chat-label"
-                >{s.name || s.native_id}<small
-                  >{s.native_id} · {s.type === "direct"
-                    ? "私聊"
-                    : "群聊 / 房间"}</small
+                >{chatName(s)}<small
+                  >{s.native_id} · {chatType(s)}</small
                 ></span
               ><Button
                 variant="ghost"
@@ -1253,7 +1272,18 @@
                 onclick={() => {
                   draft.scopes = draft.scopes.filter((x) => x !== s);
                 }}>移除</Button
-              >{#if s.type === "direct"}<div class="field">
+              >{#if qqDirect(s)}<div class="field">
+                  <p class="hint">{scopeAuthorized(s)
+                    ? "保存后仅授权此私聊，其他私聊未授权。"
+                    : "未授权此私聊，收到消息不会向此 agent 开放。"}</p>
+                  {#if !scopeAuthorized(s)}
+                    {#if knownContact(s)}<Button variant="outline" size="sm"
+                        onclick={() => { s.senders = [s.native_id]; }}
+                        >授权此私聊</Button>
+                    {:else}<small>读取可用聊天，确认已观测私聊后再授权。</small>{/if}
+                  {/if}
+                </div>
+              {:else if s.type === "direct"}<div class="field">
                   <label for={"peers-" + s.conversation_id}
                     >允许的私聊成员 ID（逗号分隔）</label
                   ><Input
@@ -1311,7 +1341,7 @@
           <dl>
             <dt>授权聊天</dt>
             <dd>
-              {draft.scopes.map((s) => s.name || s.native_id).join("、") ||
+              {draft.scopes.map(scopeLabel).join("、") ||
                 "无授权聊天"}
               <small>{draft.scopes.map((s) => s.native_id).join("、")}</small>
             </dd>
@@ -1326,7 +1356,7 @@
             <dd>先保存，再显示连接结果。连接失败时尝试恢复原设置。</dd>
           </dl>
           <p class="callout">
-            共享账号的其他 agent 保留各自授权。绑定不会授予未选聊天的访问权。
+            账号仅供此 agent 使用。未选聊天不会获得访问权。
           </p>{/if}
         {#if error}<p role="alert">{error}</p>{/if}
       </div>
@@ -1427,14 +1457,14 @@
 >
 
 <Dialog.Root
-  open={!!removal}
+  open={logged && !!removal && removal.agent_id === agent}
   onOpenChange={(v) => {
     if (!v) removal = null;
   }}
   ><Dialog.Content
     ><Dialog.Header
-      ><Dialog.Title>解绑此连接？</Dialog.Title><Dialog.Description
-        >撤销此 agent 的聊天授权，不删除历史。其他 agent 的授权保持独立。</Dialog.Description
+      ><Dialog.Title>撤销聊天授权？</Dialog.Title><Dialog.Description
+        >保留此 agent 的账号与历史。可以重新选择聊天。</Dialog.Description
       ></Dialog.Header
     ><Dialog.Footer
       ><Button
@@ -1449,10 +1479,54 @@
           run(async () => {
             await save(
               state.accounts,
-              state.bindings.filter((b) => b.id !== removal.id),
+              state.bindings.map((b) =>
+                b.id === removal.id ? { ...b, scopes: [] } : b,
+              ),
             );
             removal = null;
-          })}>确认解绑</Button
+          })}>确认撤销</Button
+      ></Dialog.Footer
+    ></Dialog.Content
+  ></Dialog.Root
+>
+
+<Dialog.Root
+  open={logged &&
+    !!accountRemoval &&
+    ownedAccounts.some((a) => a.id === accountRemoval.id)}
+  onOpenChange={(v) => {
+    if (!v) accountRemoval = null;
+  }}
+  ><Dialog.Content
+    ><Dialog.Header
+      ><Dialog.Title
+        >删除账号 {accountRemoval?.name || accountRemoval?.id}？</Dialog.Title
+      >
+      <Dialog.Description
+        >移除此账号的连接、凭据和聊天授权，保留历史。不会删除平台账号。</Dialog.Description
+      ></Dialog.Header
+    ><Dialog.Footer
+      ><Button
+        variant="outline"
+        disabled={busy || applying}
+        onclick={() => {
+          accountRemoval = null;
+        }}>取消</Button
+      ><Button
+        disabled={busy || applying}
+        onclick={() =>
+          run(async () => {
+            const id = accountRemoval.id;
+            await save(
+              state.accounts.filter((a) => a.id !== id),
+              state.bindings.map((b) => ({
+                ...b,
+                account_ids: b.account_ids.filter((account) => account !== id),
+                scopes: b.scopes.filter((s) => s.account_id !== id),
+              })),
+            );
+            accountRemoval = null;
+          })}>确认删除账号</Button
       ></Dialog.Footer
     ></Dialog.Content
   ></Dialog.Root

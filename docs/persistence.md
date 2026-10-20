@@ -42,3 +42,24 @@ NULL-send reconciliation and assets-directory creation. See operator instruction
 Conversation display labels reuse `conversations.name`; they do not participate in
 identity pins or admission. Consumer connections live only in TOML, with one sealed
 receiver credential per agent. Binding account associations do not grant chat access.
+
+The existing separate private administrator record also retains up to32 browser
+session token digests, CSRF values and their original eight-hour expiry. Login and
+logout serialize atomic private file replacement and await it before acknowledgement;
+management shutdown drains those request jobs. Normal stop clears memory without
+revoking retained sessions. Offline administrator reprovision replaces the record,
+discarding its sessions. This uses neither SQLite schema changes nor platform,
+master-key or agent-token authority. Raw browser session tokens are never persisted.
+
+Name-selected send requests use the existing sends.input column for an accepted envelope:
+immutable canonical caller JSON plus resolved account/conversation IDs. ID-selected
+requests retain the original flat canonical JSON and key order, so previously accepted
+ID requests still reconcile. This adds no SQL schema, migration, alias or configuration
+format. Known requests recheck local pinned grants before returning stored/unknown
+results; renames never redirect them. Reservation remains atomic before native I/O.
+
+Optional capture-time Message.conversation.name lives only in the original messages.body
+and deliveries.body JSON. It uses existing retained conversation metadata (fresh QQ
+contact metadata on that observation), introduces no column/version/migration/cache,
+and is never backfilled or rewritten on metadata refresh/rename. Old absent-name
+snapshots stay byte-identical across restart and deduplication.

@@ -1,4 +1,4 @@
-import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 
 import { readFile, open, rename, unlink, stat } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -54,23 +54,91 @@ export async function provisionAdmin(path: string, password: string) {
 export class Admin {
   sessions = new Map<string, { csrf: string; expires: number }>();
   attempts: number[] = [];
+  private path = "";
+  private record!: { salt: string; hash: string };
+  private pending: Promise<unknown> = Promise.resolve();
+  async open(path: string) {
+    await privateFile(path);
+    const {
+      salt,
+      hash,
+      sessions = [],
+    } = JSON.parse(await readFile(path, "utf8"));
+    if (
+      typeof salt !== "string" ||
+      typeof hash !== "string" ||
+      !Array.isArray(sessions) ||
+      sessions.length > 32
+    )
+      throw new Error("Invalid administrator record");
+    this.path = path;
+    this.record = { salt, hash };
+    this.sessions.clear();
+    const now = Date.now();
+    for (const s of sessions)
+      if (
+        typeof s.digest === "string" &&
+        /^[a-f0-9]{64}$/.test(s.digest) &&
+        typeof s.csrf === "string" &&
+        /^[A-Za-z0-9_-]{43}$/.test(s.csrf) &&
+        Number.isFinite(s.expires) &&
+        s.expires > now &&
+        s.expires <= now + 8 * 3600000
+      )
+        this.sessions.set(s.digest, { csrf: s.csrf, expires: s.expires });
+  }
+  private digest(token: string) {
+    return createHash("sha256")
+      .update(this.record.salt)
+      .update(token)
+      .digest("hex");
+  }
+  private serialize<T>(work: () => Promise<T>) {
+    const next = this.pending.then(work);
+    this.pending = next.catch(() => {});
+    return next;
+  }
+  private persist() {
+    return atomicPrivate(
+      this.path,
+      JSON.stringify({
+        ...this.record,
+        sessions: [...this.sessions].map(([digest, value]) => ({
+          digest,
+          ...value,
+        })),
+      }),
+    );
+  }
   async login(path: string, password: string) {
     const now = Date.now();
     this.attempts = this.attempts.filter((t) => t > now - 60000);
     if (this.attempts.length >= 5) return undefined;
     this.attempts.push(now);
-    await privateFile(path);
-    const record = JSON.parse(await readFile(path, "utf8"));
-    const expected = Buffer.from(record.hash, "hex");
-    const actual = await passwordHash(password, record.salt);
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
-      return undefined;
-    const token = randomBytes(32).toString("base64url");
-    this.session(token, {
-      csrf: randomBytes(32).toString("base64url"),
-      expires: now + 8 * 3600000,
+    return this.serialize(async () => {
+      await this.open(path);
+      const record = this.record;
+      const expected = Buffer.from(record.hash, "hex");
+      const actual = await passwordHash(password, record.salt);
+      if (
+        actual.length !== expected.length ||
+        !timingSafeEqual(actual, expected)
+      )
+        return undefined;
+      const token = randomBytes(32).toString("base64url");
+      this.session(token, {
+        csrf: randomBytes(32).toString("base64url"),
+        expires: now + 8 * 3600000,
+      });
+      await this.persist();
+      return token;
     });
-    return token;
+  }
+  logout(token: string) {
+    return this.serialize(async () => {
+      this.sessions.delete(this.digest(token));
+      await this.persist();
+    });
   }
   session(token: string, value?: { csrf: string; expires: number }) {
     for (const [key, s] of this.sessions)
@@ -78,8 +146,8 @@ export class Admin {
     if (value) {
       if (this.sessions.size >= 32)
         this.sessions.delete(this.sessions.keys().next().value!);
-      this.sessions.set(token, value);
+      this.sessions.set(this.digest(token), value);
     }
-    return this.sessions.get(token);
+    return this.sessions.get(this.digest(token));
   }
 }

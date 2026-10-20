@@ -25,12 +25,21 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
   let permission = false,
     tokenStall = false,
     failureStatus = 500;
+  let failureCode: number | string = 500,
+    failureMessage = "test failure";
   let joined = true,
     encrypted = false;
   let encryptedNative: string | undefined;
   let aborts = 0;
   let matrixEvents: any[] = [];
   let roomName = "Owned fixture room";
+  let members: Record<string, { display_name: string }> = {
+    "@owner:fixture": { display_name: "Owner" },
+    "@post:fixture": { display_name: "Post" },
+  };
+  let membersStatus = 200;
+  const qqGroupNames = new Map<string, string | null>();
+  let qqMetadataDelay = 0;
   let syncWake: (() => void) | undefined;
   let qqSocket: any;
   let counter = 0;
@@ -90,6 +99,28 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
       return json({ id: "qq-user", username: "Test Bot" });
     if (path === "/gateway")
       return json({ url: `ws://127.0.0.1:${gatewayPort}` });
+    if (path.startsWith("/v2/groups/") && path.endsWith("/info")) {
+      if (qqMetadataDelay) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(done, qqMetadataDelay);
+          function done() {
+            clearTimeout(timer);
+            req.signal.removeEventListener("abort", done);
+            resolve();
+          }
+          req.signal.addEventListener("abort", done, { once: true });
+        });
+        if (req.signal.aborted) {
+          aborts++;
+          return new Response(null, { status: 499 });
+        }
+      }
+      const native = decodeURIComponent(path.split("/")[3]!);
+      const name = qqGroupNames.get(native);
+      return name === null
+        ? json({ code: 403, message: "owned permission denial" }, 403)
+        : json({ group_openid: native, group_name: name });
+    }
     if (path.includes("/files"))
       return json({ file_uuid: "file", file_info: "file-info", ttl: 300 });
     if (path.endsWith("/messages") || path.includes("/send/m.room.message/")) {
@@ -101,7 +132,7 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
       }
       if (failSendAt === counter)
         return json(
-          { code: 500, message: "test failure", errcode: "M_UNKNOWN" },
+          { code: failureCode, message: failureMessage, errcode: "M_UNKNOWN" },
           failureStatus,
         );
       if (stall)
@@ -206,12 +237,12 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     if (path.endsWith("/joined_members") && permission)
       return json({ errcode: "M_FORBIDDEN" }, 403);
     if (path.endsWith("/joined_members"))
-      return json({
-        joined: {
-          "@owner:fixture": { display_name: "Owner" },
-          "@post:fixture": { display_name: "Post" },
-        },
-      });
+      return json(
+        membersStatus === 200
+          ? { joined: members }
+          : { errcode: "M_FORBIDDEN" },
+        membersStatus,
+      );
     if (path.endsWith("/state"))
       return json([
         { type: "m.room.name", content: { name: roomName } },
@@ -312,6 +343,12 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     roomName(value: string) {
       roomName = value;
     },
+    qqGroupName(native: string, value: string | null) {
+      qqGroupNames.set(native, value);
+    },
+    delayQQMetadata(ms: number) {
+      qqMetadataDelay = ms;
+    },
     matrixCredential(value: string) {
       matrixCredential = value;
     },
@@ -362,6 +399,13 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     permission(v: boolean) {
       permission = v;
     },
+    matrixMembers(
+      value: Record<string, { display_name: string }>,
+      status = 200,
+    ) {
+      members = value;
+      membersStatus = status;
+    },
     joined(v: boolean) {
       joined = v;
     },
@@ -377,9 +421,16 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     tokenStall(v: boolean) {
       tokenStall = v;
     },
-    failAt(n: number, status = 500) {
+    failAt(
+      n: number,
+      status = 500,
+      code: number | string = 500,
+      message = "test failure",
+    ) {
       failSendAt = n;
       failureStatus = status;
+      failureCode = code;
+      failureMessage = message;
     },
     get sendCount() {
       return counter;

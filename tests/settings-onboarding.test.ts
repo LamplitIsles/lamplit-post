@@ -13,6 +13,25 @@ const editable = (v: any) => ({
     scopes: b.scopes.map(({ name, ...s }: any) => s),
   })),
 });
+// Explicit fixture owner; verification itself never creates this association.
+function ownDraft(v: any, f: Awaited<ReturnType<typeof settingsFixture>>) {
+  v.agents = [
+    {
+      id: "cfl",
+      receiver_url: f.receiver.url,
+      receiver_credential: "receiver-secret",
+    },
+  ];
+  v.bindings = [
+    {
+      id: "draft-owner",
+      agent_id: "cfl",
+      account_ids: v.accounts.map((a: any) => a.id),
+      scopes: [],
+      wake: {},
+    },
+  ];
+}
 
 test("draft Matrix exact SDK verifies proposed identity/list before persistence, empty/denied/mismatch/CSRF distinct; pins reused", async () => {
   const f = await settingsFixture(true);
@@ -227,6 +246,7 @@ test("QQ QR callback stays server-held, owner/CSRF bounded; explicit save seals 
         credential: "scan-secret",
       },
     ];
+    ownDraft(v, f);
     const ack = await (
       await f.request("settings", {
         ...v,
@@ -514,16 +534,17 @@ test("QQ failed apply retains the same server authorization for explicit retry w
     );
     const submit = async () => {
       const v = editable(await f.app.view());
+      v.accounts = [
+        {
+          id: "retry-scan",
+          platform: "qq",
+          native_id: "qq-app",
+          credential: "retained-secret",
+        },
+      ];
+      ownDraft(v, f);
       return f.request("settings", {
         ...v,
-        accounts: [
-          {
-            id: "retry-scan",
-            platform: "qq",
-            native_id: "qq-app",
-            credential: "retained-secret",
-          },
-        ],
         qq_authorization: { id: qr.id, account_id: "retry-scan" },
       });
     };
@@ -639,6 +660,7 @@ test.each([false, true])(
         f.platform.delayWhoami(300);
       }
       stage = "submit";
+      ownDraft(v, f);
       const ack = await (
         await f.request("settings", {
           ...v,
@@ -732,6 +754,7 @@ test.each(["cancel", "logout"])(
         },
       ];
       f.platform.delayWhoami(300);
+      ownDraft(v, f);
       const ack = await (
         await f.request("settings", {
           ...v,

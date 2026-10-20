@@ -264,10 +264,10 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         const expanded = await evaluate(
           "document.querySelector('.bindings').innerText",
         );
+        expect(expanded).not.toContain("账号共享");
         for (const text of [
           "聊天范围",
           "会唤醒",
-          "账号共享",
           "Owned fixture room",
           "!room:fixture",
         ])
@@ -311,7 +311,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         await wait("!document.querySelector('[role=dialog]')");
       }
       await f.login();
-      // Reproduce a converted/shared binding: both account associations, only Matrix grants.
+      // One owner has both accounts, with only Matrix chat grants.
       const mixed = await f.app.view();
       const matrixAccount = mixed.accounts.find(
         (a) => a.platform === "matrix",

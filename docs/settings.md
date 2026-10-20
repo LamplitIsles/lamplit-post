@@ -36,8 +36,14 @@ master key, encrypted platform/receiver secrets and agent tokens. Keep it outsid
 the data directory and distinct from the config/key. No online first-user setup,
 recovery URL or default password exists.
 
-Open the configured origin. Login sessions expire after eight hours, use HttpOnly
-SameSite=Strict cookies, and are discarded on process restart or logout. Login
+Open the configured origin. Login sessions expire eight hours after login and use
+HttpOnly SameSite=Strict cookies. Unexpired sessions survive normal process restart
+and deployment within the same installation; restart does not extend their expiry.
+The existing private administrator record stores only salted token digests, CSRF
+values and expiry, with at most32 sessions. Login/logout persistence is awaited
+before success; logout and offline password reprovision revoke retained sessions.
+Sessions issued by older ephemeral versions cannot be recovered, so the first
+upgrade may require one login. Login
 allows five attempts per minute across the loopback listener. For later Caddy
 HTTPS use a fixed HTTPS `origin`; the cookie then includes Secure. Preserve that
 Host header when proxying to loopback. Post does not trust forwarded headers.
@@ -55,7 +61,7 @@ uploads, history, sends or asset reads: those retain grant checks. Fully paused
 bindings still deny machine HTTP access. The browser session does not authorize
 machine MCP/assets, and an agent Bearer cannot administer Post.
 
-Choose an existing shared account or add an account. QQ's primary path is **扫码连接 QQ**:
+Choose one of this agent's accounts or add its own account. QQ's primary path is **扫码连接 QQ**:
 scan the provider authorization QR in mobile QQ, then explicitly confirm the account,
 chat grants and save. The connector supplies App ID/AppSecret to Post in server memory;
 only the QR/status/App ID reach the browser. This is credential authorization, distinct
@@ -80,8 +86,12 @@ operation deadline and retire all request I/O before releasing ownership.
 
 Grant chats, then configure wake rules separately. QQ candidates distinguish locally
 observed conversations from configured pins, not a complete upstream directory. Manual
-native IDs are explicit and are not claims of verification. Private conversations still
-require explicit peer IDs. Room visibility is not an agent grant. The independent consumer connection owns one receiver URL and write-only secret per
+native IDs are explicit and are not claims of verification. Selecting an observed/verified QQ private contact and explicitly saving grants only
+that contact's native peer. Receipt/discovery alone never grants access. Existing empty
+or mismatched private rules remain denied on load/open; use **授权此私聊** after
+reading known contacts, or explicitly reselect the contact, then save. Cancel changes
+nothing. Manual/unverified QQ and Matrix private conversations retain explicit peer
+ID admission; Matrix semantics are unchanged. Room visibility is not an agent grant. The independent consumer connection owns one receiver URL and write-only secret per
 agent; chat bindings never ask for them. Edit the consumer connection outside the
 chat wizard; a blank secret preserves the existing one. Cancelling discards the draft. Required inputs remain scrollable on short
 normal-zoom desktop/mobile viewports, without a footer painted over them.
@@ -206,12 +216,25 @@ If a newly verified account fails later during startup, rollback preserves its i
 
 The exact Matrix44 vendor patch also prevents late SDK startup and capability/keepalive polling after cancellation. It preserves the original timeoutSignal hunk and all native deadlines. Native body retirement remains owned by Post; cancelled-start public-SDK and application probes must exit naturally before cleanup is accepted. See `docs/dependencies.md` for the patch boundary.
 
-Account associations are explicit and remain visible with zero chat grants. Globally
-connected accounts are not automatically associated with an agent; an authorized QQ
-draft is awaiting save, not connected. Editing one account in a shared binding keeps
-the other accounts and scopes. Collapsed rows show only platform icons, account names, essential status and
-**详情与编辑**. Expand it for all chat scope/name details, native IDs, wake rules,
-sharing and actions.
+Each configured account belongs to exactly one distinct agent through existing
+`bindings.account_ids`, including disabled bindings and accounts with zero chat grants.
+Several bindings may reference an account only for that same owner. An agent may own
+multiple accounts on the same platform. The home and picker show only the selected
+agent's accounts; there is no global unassociated attachment pool or account sharing.
+Saved ownerless/shared configurations fail validation: an operator must explicitly
+choose one owner, without inventing credentials or granting chats. Retained accounts
+cannot transfer owners through settings. Global inventory remains administrator-only.
+
+Saving a new account associates it with the selected agent atomically; draft verification
+checks only account identity/credential/pins, never ownership or admission, and does not
+persist or start an account. An authorized QQ draft is still awaiting save. Clearing chat
+grants retains account ownership and shows **未授权聊天**. **撤销聊天授权** preserves
+accounts/history; **删除账号** is a separate explicit confirmation removing the connection,
+credential and scopes, while keeping identity pins/history and other accounts. There is
+no permanent owner registry after an explicit full account deletion. Editing one account
+in a multi-account binding preserves its other accounts and scopes. Collapsed rows retain
+platform icons, account names and status; **详情与编辑** contains chat/wake/identity detail
+and actions. Native QQ `share_url` remains a bot invitation link, not account sharing.
 
 Matrix room names are display metadata in the existing conversation store. Selection
 saves bounded labels for selected rooms; reload needs no upstream lookup. IDs and
@@ -229,3 +252,24 @@ empty local list are separate states. The exact main QQBot4.14 adapter has no
 getGuildList; its QQGuildBot sibling lists channels, not QQ groups. This does not
 assert that Tencent has no other APIs. The supported event includes group_openid:
 [official native mention event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html).
+
+QQ candidates, selected chats, confirmation and saved details distinguish **群聊**
+and **私聊**. Private names come from actual observed sender metadata. Explicit
+**读取可用聊天 / 重试** also tries the public known-group metadata method for up to20
+locally known groups, under one best-effort budget of the smaller of the existing
+native deadline and8seconds. This stays within the settings listener's existing10second
+idle allowance; failures keep local candidates and an honest **名称不可用** fallback.
+Names reuse the existing conversation store, with no startup fetch, polling or extra
+cache. OpenIDs stay secondary and remain searchable; names never change pins or grants.
+Authorized consumers can read the same names/type through existing v1
+`get_conversation`/`list_conversations`. Events/history already carry conversation
+type; their fixed message schema does not add a name field. Observed candidates
+with no explicit chat/peer grant remain inaccessible to consumers.
+
+QQ history remains locally observed. Authorized ordinary group messages that reach
+Post are archived and readable even when only native @ messages wake the agent.
+The adapter already handles `GROUP_MESSAGE_CREATE` under the existing bit25
+subscription. Tencent's receive-all capability determines whether it supplies those
+events; Post cannot recover messages never supplied or promise full group history.
+The finite `native_event` stderr field distinguishes ordinary/@/direct arrival
+without logging content or identifiers.

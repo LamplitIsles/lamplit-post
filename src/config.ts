@@ -163,6 +163,14 @@ export const ConfigSchema = z
     for (const b of v.bindings)
       if (!v.agents.some((a) => a.id === b.agent_id))
         c.addIssue({ code: "custom", message: "Unknown agent" });
+    for (const [index, a] of v.accounts.entries())
+      if (!accountOwner(v, a.id))
+        c.addIssue({
+          code: "custom",
+          path: ["accounts", index],
+          message:
+            "Each account requires exactly one agent owner. Choose an owner explicitly; sharing and ownerless accounts are not supported.",
+        });
     const conv = new Map<string, string>();
     const native = new Map<string, string>();
     const ids = new Map<string, string>();
@@ -200,6 +208,18 @@ export type Config = z.infer<typeof ConfigSchema>;
 export type Binding = Config["bindings"][number];
 export type Scope = Binding["scopes"][number];
 export type AccountConfig = Config["accounts"][number];
+/** account_ids is the sole ownership relation, including disabled/zero-grant bindings. */
+export function accountOwner(
+  config: Pick<Config, "bindings">,
+  account: string,
+) {
+  const owners = new Set(
+    config.bindings
+      .filter((b) => b.account_ids.includes(account))
+      .map((b) => b.agent_id),
+  );
+  return owners.size === 1 ? [...owners][0] : undefined;
+}
 export const parseConfig = (input: unknown): Config =>
   ConfigSchema.parse(input);
 export function resolveConfigPaths(raw: Config, base: string): Config {

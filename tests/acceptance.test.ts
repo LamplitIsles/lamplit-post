@@ -150,6 +150,7 @@ test("all seven projections and raw assets enforce separate agent scope and priv
       ...f.r.service.config.bindings[0]!,
       id: "other-binding",
       agent_id: "other",
+      account_ids: [],
       scopes: [
         {
           ...f.r.service.config.bindings[0]!.scopes[1]!,
@@ -205,7 +206,7 @@ test("all seven projections and raw assets enforce separate agent scope and priv
       (await f.r.service.call("other", "list_accounts", {})).items.map(
         (a: any) => a.account_id,
       ),
-    ).toEqual(["qq-main"]);
+    ).toEqual([]);
     expect(
       (
         await fetch(f.r.http.url + asset.download_path, {

@@ -55,7 +55,12 @@ const manifest = {
   sdk_patch_sha256: createHash("sha256")
     .update(await readFile("patches/matrix-js-sdk+44.0.0.patch"))
     .digest("hex"),
-  consumer_contract: "contracts/v1 (ef2fa54ec90630bad5b38b2768a13b7bf543dc4c)",
+  consumer_contract:
+    "contracts/v1 (sha256 " +
+    createHash("sha256")
+      .update(await readFile("contracts/v1/index.ts"))
+      .digest("hex") +
+    ")",
   database_provider: "node:sqlite DatabaseSync (single connection)",
 };
 await writeFile(

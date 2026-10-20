@@ -5,6 +5,8 @@ import {
   resolveConfigPaths,
   privateFile,
   type Config,
+  type AccountConfig,
+  accountOwner,
 } from "./config";
 import { dirname, resolve } from "node:path";
 import { Application } from "./runtime";
@@ -215,25 +217,10 @@ export class Settings {
         "invalid_request",
       );
     for (const a of next.accounts) {
-      const rows = this.store.db
-        .prepare(
-          "SELECT * FROM identities WHERE account=? OR (platform=? AND native=?)",
-        )
-        .all(a.id, a.platform, a.native_id);
-      for (const r of rows)
+      this.validateAccount(a);
+      if (this.config.accounts.some((old) => old.id === a.id))
         need(
-          r.account === a.id &&
-            r.platform === a.platform &&
-            r.native === a.native_id,
-          "conflict",
-        );
-      const old = this.config.accounts.find((o) => o.id === a.id);
-      if (old)
-        need(
-          old.platform === a.platform &&
-            old.native_id === a.native_id &&
-            old.homeserver === a.homeserver &&
-            old.credential === a.credential,
+          accountOwner(next, a.id) === accountOwner(this.config, a.id),
           "conflict",
         );
     }
@@ -262,6 +249,43 @@ export class Settings {
             "conflict",
           );
       }
+  }
+  /** Draft verification checks identity, never creates ownership or admission. */
+  validateAccount(a: AccountConfig) {
+    need(
+      !this.config.accounts.some(
+        (other) =>
+          other.id !== a.id &&
+          ((other.platform === a.platform && other.native_id === a.native_id) ||
+            other.credential === a.credential),
+      ) &&
+        !this.config.agents.some(
+          (agent) => agent.receiver_credential === a.credential,
+        ) &&
+        a.credential !== "__keycheck",
+      "conflict",
+    );
+    const rows = this.store.db
+      .prepare(
+        "SELECT * FROM identities WHERE account=? OR (platform=? AND native=?)",
+      )
+      .all(a.id, a.platform, a.native_id);
+    for (const r of rows)
+      need(
+        r.account === a.id &&
+          r.platform === a.platform &&
+          r.native === a.native_id,
+        "conflict",
+      );
+    const old = this.config.accounts.find((o) => o.id === a.id);
+    if (old)
+      need(
+        old.platform === a.platform &&
+          old.native_id === a.native_id &&
+          old.homeserver === a.homeserver &&
+          old.credential === a.credential,
+        "conflict",
+      );
   }
   save(input: any): Promise<ReturnType<Settings["status"]>> {
     let acknowledge!: (value: ReturnType<Settings["status"]>) => void;

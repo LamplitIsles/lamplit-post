@@ -1,6 +1,7 @@
+import { qqInbound } from "./diagnostics";
 import type { Tables } from "./models";
 import { createHmac } from "node:crypto";
-import { Config, Binding, Scope } from "./config";
+import { Config, Binding, Scope, accountOwner } from "./config";
 import { Store, opaque, digest, checkConversationPin } from "./store";
 import { Assets } from "./assets";
 import { Fault, need } from "./errors";
@@ -83,7 +84,11 @@ export class Service {
   }
   hasGrants(agent: string) {
     return this.bindings(agent).some((b) =>
-      b.scopes.some((s) => this.admitsConversation(s)),
+      b.scopes.some(
+        (s) =>
+          accountOwner(this.config, s.account_id) === agent &&
+          this.admitsConversation(s),
+      ),
     );
   }
   scope(agent: string, account: string, conversation: string): Scope {
@@ -92,6 +97,7 @@ export class Service {
       .find(
         (s) =>
           s.account_id === account &&
+          accountOwner(this.config, account) === agent &&
           s.conversation_id === conversation &&
           this.admitsConversation(s),
       );
@@ -113,6 +119,7 @@ export class Service {
     );
     return (
       b.enabled &&
+      accountOwner(this.config, m.account_id) === b.agent_id &&
       !!s &&
       this.admitsConversation(s) &&
       (s.type === "group" ||
@@ -203,9 +210,33 @@ export class Service {
     need(!this.closed, "unavailable");
     if (this.errors.has(account)) throw new Fault("unavailable");
     const a = this.config.accounts.find((a) => a.id === account)!;
-    if (o.sender === a.native_id && direction === "inbound") return null;
+    const diagnostic = a.platform === "qq" && direction === "inbound";
+    const summary = {
+      bindings: 0,
+      inactive: 0,
+      disabled: 0,
+      scope_missing: 0,
+      peer_denied: 0,
+      admitted: 0,
+      wake_none: 0,
+      wake_direct: 0,
+      wake_mention: 0,
+      wake_reply: 0,
+      wake_alias: 0,
+      deliveries_created: 0,
+    };
+    let duplicateObservation = false;
+    if (o.sender === a.native_id && direction === "inbound") {
+      if (diagnostic)
+        qqInbound({
+          stage: "observation",
+          type: o.conversation_type,
+          category: "self",
+        });
+      return null;
+    }
     try {
-      return this.store.transaction((db) => {
+      const result = this.store.transaction((db) => {
         let conv = db
           .prepare(
             "SELECT * FROM conversations WHERE account=? AND native=? AND type=?",
@@ -226,6 +257,18 @@ export class Service {
               o.conversation_native_id,
               o.conversation_type,
             ) as unknown as Tables["conversations"];
+        if (
+          a.platform === "qq" &&
+          conv.type === "direct" &&
+          direction === "inbound" &&
+          o.name?.trim()
+        ) {
+          conv.name = o.name.trim().slice(0, 256);
+          db.prepare("UPDATE conversations SET name=? WHERE id=?").run(
+            conv.name,
+            conv.id,
+          );
+        }
         const native = o.mutation
           ? o.native_id + ":" + o.mutation
           : o.native_id;
@@ -236,7 +279,10 @@ export class Service {
             )
             .all(account, conv.id, native) as unknown as Tables["messages"][]
         )[0];
-        if (duplicate) return JSON.parse(duplicate.body) as MessageV1;
+        if (duplicate) {
+          duplicateObservation = true;
+          return JSON.parse(duplicate.body) as MessageV1;
+        }
         const id = opaque("msg");
         const replied = o.reply_native_id
           ? (
@@ -252,6 +298,7 @@ export class Service {
             )[0]
           : null;
         const reply = replied ? (JSON.parse(replied.body) as MessageV1) : null;
+        const conversationName = conv.name?.trim().slice(0, 256);
         const m: MessageV1 = {
           id,
           account_id: account,
@@ -260,6 +307,11 @@ export class Service {
             id: conv.id,
             native_id: conv.native,
             type: conv.type,
+            ...(conversationName &&
+            conversationName !== conv.native &&
+            conversationName !== conv.id
+              ? { name: conversationName }
+              : {}),
           },
           sender: { native_id: o.sender, ...(o.name ? { name: o.name } : {}) },
           timestamp: o.timestamp,
@@ -305,9 +357,34 @@ export class Service {
           ).run(asset.asset_id, id);
         if (!o.catchup)
           for (const b of this.config.bindings) {
-            if (!this.active(b.agent_id) || !this.admitted(b, m)) continue;
+            summary.bindings++;
+            if (!this.active(b.agent_id)) {
+              summary.inactive++;
+              continue;
+            }
+            if (!this.admitted(b, m)) {
+              if (!b.enabled) summary.disabled++;
+              else if (
+                !b.scopes.some(
+                  (s) =>
+                    s.account_id === m.account_id &&
+                    s.conversation_id === m.conversation.id,
+                )
+              )
+                summary.scope_missing++;
+              else summary.peer_denied++;
+              continue;
+            }
+            summary.admitted++;
             const reason = this.wake(b, m);
-            if (!reason) continue;
+            if (!reason) {
+              summary.wake_none++;
+              continue;
+            }
+            if (reason === "direct_message") summary.wake_direct++;
+            else if (reason === "mentioned") summary.wake_mention++;
+            else if (reason === "replied_to_self") summary.wake_reply++;
+            else summary.wake_alias++;
             const count = (
               db
                 .prepare(
@@ -337,10 +414,30 @@ export class Service {
                   .receiver_url,
                 JSON.stringify(event),
               ) as unknown as Tables["deliveries"];
+            summary.deliveries_created++;
           }
         return m;
       }) as MessageV1;
+      // Report committed outcomes only, outside the synchronous transaction.
+      if (diagnostic)
+        qqInbound({
+          stage: "observation",
+          type: o.conversation_type,
+          category: duplicateObservation
+            ? "duplicate"
+            : o.catchup
+              ? "catchup"
+              : "archived",
+          ...summary,
+        });
+      return result;
     } catch (e) {
+      if (diagnostic)
+        qqInbound({
+          stage: "observation",
+          type: o.conversation_type,
+          category: "observation_failed",
+        });
       this.errors.set(account, e instanceof Fault ? e.code : "storage");
       try {
         await this.store.gap(account, "capture_stopped");
@@ -399,7 +496,9 @@ export class Service {
       );
       return {
         items: this.config.accounts
-          .filter((a) => ids.has(a.id))
+          .filter(
+            (a) => ids.has(a.id) && accountOwner(this.config, a.id) === agent,
+          )
           .map((a) => ({
             account_id: a.id,
             platform: a.platform,
@@ -415,7 +514,11 @@ export class Service {
     if (name === "list_conversations") {
       const scopes = this.bindings(agent)
         .flatMap((b) => b.scopes)
-        .filter((s) => s.account_id === args.account_id);
+        .filter(
+          (s) =>
+            s.account_id === args.account_id &&
+            accountOwner(this.config, s.account_id) === agent,
+        );
       need(scopes.length);
       const query = name + ":" + args.account_id;
       const offset = this.offset(agent, query, args.before);
@@ -525,7 +628,13 @@ export class Service {
       conversation_id: r.id,
       native_id: r.native,
       type: r.type,
-      ...(r.name ? { name: r.name } : {}),
+      ...(r.name &&
+      !(
+        this.config.accounts.find((a) => a.id === r.account)?.platform ===
+          "qq" && r.name === r.native
+      )
+        ? { name: r.name }
+        : {}),
       capabilities: this.capabilities(r.account),
     };
   }
@@ -542,16 +651,202 @@ export class Service {
     signal.throwIfAborted();
     return s;
   }
+  /** First admission only: names select existing authority; they never create it. */
+  private async sendTarget(agent: string, args: any, signal: AbortSignal) {
+    if (args.conversation_name === undefined) {
+      const scope = await this.check(
+        agent,
+        args.account_id,
+        args.conversation_id,
+        signal,
+      );
+      return {
+        scope,
+        validate: () =>
+          this.scope(agent, scope.account_id, scope.conversation_id),
+      };
+    }
+    const candidates = () => {
+      const found = new Map<string, Scope>();
+      for (const b of this.bindings(agent))
+        for (const s of b.scopes) {
+          if (
+            accountOwner(this.config, s.account_id) !== agent ||
+            !this.admitsConversation(s) ||
+            (args.account_id !== undefined &&
+              s.account_id !== args.account_id) ||
+            (args.conversation_type !== undefined &&
+              s.type !== args.conversation_type)
+          )
+            continue;
+          const account = this.config.accounts.find(
+            (a) => a.id === s.account_id,
+          );
+          if (
+            !account ||
+            (args.platform !== undefined && account.platform !== args.platform)
+          )
+            continue;
+          const row = this.store.db
+            .prepare("SELECT * FROM conversations WHERE account=? AND id=?")
+            .get(s.account_id, s.conversation_id);
+          if (row && this.conversation(row).name === args.conversation_name)
+            found.set(JSON.stringify([s.account_id, s.conversation_id]), s);
+        }
+      return found;
+    };
+    const before = candidates();
+    const eligible: Scope[] = [];
+    for (const s of before.values()) {
+      try {
+        eligible.push(
+          await this.check(agent, s.account_id, s.conversation_id, signal),
+        );
+      } catch (e) {
+        if (!(e instanceof Fault && e.code === "not_found")) throw e;
+      }
+    }
+    if (!eligible.length)
+      throw new Fault(
+        "not_found",
+        "No admitted conversation has that exact current name. Use an exact name from get_conversation/list_conversations, or its account_id + conversation_id when unnamed.",
+      );
+    if (eligible.length > 1)
+      throw new Fault(
+        "conflict",
+        "Several admitted conversations have that exact name. Specify account_id, platform or conversation_type; use exact IDs if still ambiguous. Choices (at most 8): " +
+          JSON.stringify(
+            eligible.slice(0, 8).map((s) => ({
+              conversation_name: args.conversation_name,
+              platform: this.config.accounts.find((a) => a.id === s.account_id)!
+                .platform,
+              conversation_type: s.type,
+              account_id: s.account_id,
+              conversation_id: s.conversation_id,
+            })),
+          ),
+      );
+    const scope = eligible[0]!;
+    const keys = (values: Map<string, Scope>) =>
+      JSON.stringify([...values.keys()].sort());
+    return {
+      scope,
+      validate: () => {
+        need(keys(candidates()) === keys(before), "conflict");
+        this.scope(agent, scope.account_id, scope.conversation_id);
+      },
+    };
+  }
+  private async mentionContent(
+    agent: string,
+    scope: Scope,
+    content: any[],
+    signal: AbortSignal,
+  ) {
+    if (!content.some((p) => p.type === "mention" && p.name !== undefined))
+      return { content: content as ContentV1[], validate: () => {} };
+    need(scope.type === "group", "invalid_request");
+    const qq =
+      this.config.accounts.find((a) => a.id === scope.account_id)!.platform ===
+      "qq";
+    const observed = () => {
+      const speakers = new Map<string, string>();
+      for (const row of this.store.db
+        .prepare(
+          "SELECT body FROM messages WHERE account=? AND conversation=? ORDER BY seq DESC",
+        )
+        .iterate(scope.account_id, scope.conversation_id)) {
+        const m = JSON.parse(row.body as string) as MessageV1;
+        if (m.direction !== "inbound" || m.mutation || !this.visible(agent, m))
+          continue;
+        const { native_id: id, name } = m.sender;
+        if (!speakers.has(id) && typeof name === "string" && name.trim())
+          speakers.set(id, name.trim().slice(0, 256));
+      }
+      return [...speakers]
+        .filter(([id, name]) => name !== id)
+        .map(([native_id, name]) => ({ native_id, name }));
+    };
+    const members = qq
+      ? { items: observed(), capability: "supported" }
+      : await this.platforms.get(scope.account_id)!.members(scope, signal);
+    signal.throwIfAborted();
+    if (members.capability !== "supported")
+      throw new Fault(
+        "unavailable",
+        "Member names are unavailable for this conversation; no mention was submitted. Use a known native_user_id instead.",
+      );
+    const resolve = (
+      items: { native_id: string; name?: string }[],
+    ): ContentV1[] =>
+      content.map((part) => {
+        if (part.type !== "mention" || part.name === undefined) return part;
+        const matches = [
+          ...new Set(
+            items
+              .filter(
+                (m) => m.name && m.name !== m.native_id && m.name === part.name,
+              )
+              .map((m) => m.native_id),
+          ),
+        ];
+        if (!matches.length)
+          throw new Fault(
+            "not_found",
+            qq
+              ? "No observed speaker in this chat has that exact name. Observations are incomplete and are not a current roster; use a known native_user_id."
+              : "No joined member has that exact name; use a known native_user_id.",
+          );
+        if (matches.length > 1)
+          throw new Fault(
+            "conflict",
+            "Several members have that exact name. Use native_user_id. Choices (at most 8): " +
+              JSON.stringify(
+                matches
+                  .slice(0, 8)
+                  .map((native_user_id) => ({
+                    name: part.name,
+                    native_user_id,
+                  })),
+              ),
+          );
+        return { type: "mention", native_user_id: matches[0]! };
+      });
+    const resolved = resolve(members.items);
+    return {
+      content: resolved,
+      validate: () => {
+        if (qq)
+          need(
+            JSON.stringify(resolve(observed())) === JSON.stringify(resolved),
+            "conflict",
+          );
+      },
+    };
+  }
   async send(agent: string, args: any, signal: AbortSignal): Promise<Send> {
-    const scope = this.scope(agent, args.account_id, args.conversation_id);
     const serialized = JSON.stringify(args);
+    const named =
+      args.conversation_name !== undefined ||
+      args.content.some(
+        (p: any) => p.type === "mention" && p.name !== undefined,
+      );
     const old = (
       this.store.db
         .prepare("SELECT * FROM sends WHERE `agent` = ? AND `request` = ?")
         .all(agent, args.request_id) as unknown as Tables["sends"][]
     )[0];
     if (old) {
-      need(old.input === serialized, "conflict");
+      const accepted = named
+        ? JSON.parse(old.input)
+        : { caller: old.input, target: args };
+      need(accepted.caller === serialized, "conflict");
+      // Reconcile the durable pin before any current-name lookup or native I/O.
+      this.scope(
+        agent,
+        accepted.target.account_id,
+        accepted.target.conversation_id,
+      );
       return old.result
         ? JSON.parse(old.result)
         : {
@@ -561,25 +856,52 @@ export class Service {
             stored: false,
           };
     }
-    await this.check(agent, args.account_id, args.conversation_id, signal);
+    const selection = await this.sendTarget(agent, args, signal);
+    const { scope } = selection;
+    const mentions = await this.mentionContent(
+      agent,
+      scope,
+      args.content,
+      signal,
+    );
+    const content = mentions.content;
+    const input = named
+      ? JSON.stringify({
+          caller: serialized,
+          target: {
+            account_id: scope.account_id,
+            conversation_id: scope.conversation_id,
+          },
+          content,
+        })
+      : serialized;
     const reply = args.reply_to_message_id
       ? await this.message(args.reply_to_message_id)
       : null;
-    if (args.reply_to_message_id)
-      need(
+    if (
+      args.reply_to_message_id &&
+      !(
         reply &&
-          reply.account_id === scope.account_id &&
-          reply.conversation.id === scope.conversation_id &&
-          this.visible(agent, reply),
+        reply.account_id === scope.account_id &&
+        reply.conversation.id === scope.conversation_id &&
+        this.visible(agent, reply)
+      )
+    )
+      throw new Fault(
         "invalid_request",
+        "reply_to_message_id must identify an admitted Post message in the same account and conversation; native platform IDs are not accepted.",
       );
     if (
       reply &&
       this.config.accounts.find((a) => a.id === scope.account_id)?.platform ===
         "qq"
     )
-      need(Date.now() - reply.timestamp < 295000, "invalid_request");
-    for (const part of args.content as ContentV1[]) {
+      if (!(Date.now() - reply.timestamp < 295000))
+        throw new Fault(
+          "invalid_request",
+          "QQ reference reply requires a Post message less than 295 seconds old. Nothing was submitted.",
+        );
+    for (const part of content) {
       if (part.type === "text")
         need(part.text.trim().length > 0, "invalid_request");
       if (part.type === "mention")
@@ -602,16 +924,13 @@ export class Service {
           .all(agent, args.request_id) as unknown as Tables["sends"][]
       )[0];
       if (row) return row;
+      selection.validate();
+      mentions.validate();
       db
         .prepare(
           "INSERT INTO sends (`agent`,`request`,`input`,`result`) VALUES (?,?,?,?) RETURNING *",
         )
-        .get(
-          agent,
-          args.request_id,
-          serialized,
-          null,
-        ) as unknown as Tables["sends"];
+        .get(agent, args.request_id, input, null) as unknown as Tables["sends"];
       return null;
     });
     if (existing) return this.send(agent, args, signal);
@@ -644,7 +963,7 @@ export class Service {
       });
     }
 
-    for (const [index, part] of (args.content as ContentV1[]).entries()) {
+    for (const [index, part] of content.entries()) {
       if (halted) {
         parts.push({
           index,
@@ -679,16 +998,37 @@ export class Service {
           (Array.isArray(err.errors) &&
             err.errors.length > 0 &&
             err.errors.every((x: any) => rejects(x.response?.status)));
+        const category = !submitted
+          ? "not_submitted"
+          : rejected
+            ? "platform_rejected"
+            : "submission_unresolved";
+        if (
+          this.config.accounts.find((a) => a.id === scope.account_id)
+            ?.platform === "qq"
+        ) {
+          const native = Array.isArray(err.errors) ? err.errors[0] : err;
+          const status = native?.response?.status ?? native?.httpStatus;
+          const code = native?.response?.data?.code;
+          console.warn(
+            JSON.stringify({
+              event: "qq_send_failure",
+              stage: submitted ? "native_handoff" : "before_dispatch",
+              category,
+              http_status:
+                Number.isInteger(status) && status >= 400 && status <= 599
+                  ? status
+                  : null,
+              native_code: Number.isSafeInteger(code) ? code : null,
+            }),
+          );
+        }
         parts.push({
           index,
           status: !submitted || rejected ? "failed" : "unknown",
           native_message_ids: ids,
           stored: false,
-          error: !submitted
-            ? "not_submitted"
-            : rejected
-              ? "platform_rejected"
-              : "submission_unresolved",
+          error: category,
         });
         halted = true;
         continue;
@@ -778,6 +1118,27 @@ export class Service {
     )[0];
     if (!row || row.due > Date.now()) return;
     const m = await this.message(row.message);
+    const started = Date.now();
+    let httpStatus: number | null = null;
+    const diagnostic = (
+      category:
+        | "accepted"
+        | "http_rejected"
+        | "unavailable"
+        | "cancelled"
+        | "scope_revoked"
+        | "receiver_changed",
+    ) => {
+      if (m?.platform === "qq")
+        qqInbound({
+          stage: "receiver",
+          type: m.conversation.type,
+          category,
+          http_status: httpStatus,
+          attempt: row.attempt + 1,
+          elapsed_ms: Math.max(0, Date.now() - started),
+        });
+    };
     const update = (value: any) =>
       this.store.db
         .prepare(
@@ -797,11 +1158,13 @@ export class Service {
       !this.admitted(binding, m)
     ) {
       await update({ state: "cancelled", category: "scope_revoked" });
+      diagnostic("scope_revoked");
       return;
     }
     const consumer = this.config.agents.find((a) => a.id === binding.agent_id)!;
     if (row.receiver !== consumer.receiver_url) {
       await update({ state: "held", category: "receiver_changed" });
+      diagnostic("receiver_changed");
       return;
     }
     try {
@@ -826,12 +1189,15 @@ export class Service {
         redirect: "manual",
         signal: this.signal(),
       });
+      httpStatus = response.status;
       await response.body?.cancel();
       if (!response.ok) throw new Error();
       await update({ state: "accepted", category: null });
+      diagnostic("accepted");
     } catch (e) {
       if (e instanceof Fault && e.code === "not_found") {
         await update({ state: "cancelled", category: "scope_revoked" });
+        diagnostic("scope_revoked");
         return;
       }
       if (!this.closed)
@@ -842,6 +1208,13 @@ export class Service {
             Date.now() + Math.min(60000, 250 * 2 ** Math.min(row.attempt, 8)),
           category: "receiver_unavailable",
         });
+      diagnostic(
+        this.closed
+          ? "cancelled"
+          : httpStatus !== null && (httpStatus < 200 || httpStatus >= 300)
+            ? "http_rejected"
+            : "unavailable",
+      );
     }
   }
   async startDispatch() {
@@ -877,7 +1250,8 @@ export class Service {
         })(),
       );
   }
-  async status() {
+  private lastHealthDiagnostic = "";
+  async status(forceDiagnostic = false) {
     const backlog = [];
     for (const state of ["pending", "held", "accepted", "cancelled"]) {
       const count = (
@@ -899,7 +1273,7 @@ export class Service {
         ).n >= this.config.backlog_limit
       )
         full = true;
-    return {
+    const result = {
       healthy:
         !backlog.some((r) => r.state === "held") &&
         !full &&
@@ -917,6 +1291,40 @@ export class Service {
         category,
       })),
     };
+    const platforms = [...this.platforms.values()];
+    const snapshot = JSON.stringify({
+      event: "post_readiness",
+      category: result.healthy
+        ? "healthy"
+        : this.closed
+          ? "stopped"
+          : "degraded",
+      qq_total: platforms.filter((p) => p.config.platform === "qq").length,
+      qq_ready: platforms.filter((p) => p.config.platform === "qq" && p.ready)
+        .length,
+      matrix_total: platforms.filter((p) => p.config.platform === "matrix")
+        .length,
+      matrix_ready: platforms.filter(
+        (p) => p.config.platform === "matrix" && p.ready,
+      ).length,
+      pending: backlog.find((r) => r.state === "pending")?.count ?? 0,
+      held: backlog.find((r) => r.state === "held")?.count ?? 0,
+      backlog_full: full ? 1 : 0,
+      capture_errors: [...this.errors.values()].filter((e) =>
+        e.startsWith("capture_"),
+      ).length,
+      dispatch_errors: [...this.errors.values()].filter(
+        (e) => e === "dispatch_storage",
+      ).length,
+      other_errors: [...this.errors.values()].filter(
+        (e) => !e.startsWith("capture_") && e !== "dispatch_storage",
+      ).length,
+    });
+    if (forceDiagnostic || snapshot !== this.lastHealthDiagnostic) {
+      this.lastHealthDiagnostic = snapshot;
+      console.warn(snapshot);
+    }
+    return result;
   }
   async stop() {
     if (this.closed) return;

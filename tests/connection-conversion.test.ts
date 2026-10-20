@@ -172,6 +172,25 @@ for (const disagreement of ["url", "secret"])
     }
   });
 
+for (const conflict of ["ownerless", "shared"] as const)
+  test(`conversion rejects ${conflict} account ownership before any persisted mutation`, async () => {
+    const f = await fixture();
+    try {
+      if (conflict === "shared") f.raw.bindings[1]!.agent_id = "other";
+      else for (const b of f.raw.bindings) b.scopes = [];
+      await writeFile(f.path, stringify(f.raw), { mode: 0o600 });
+      const before = await readFile(f.path),
+        db = await readFile(f.config.data_dir + "/post.sqlite");
+      await expect(convertConnections(f.path)).rejects.toThrow(
+        "exactly one agent owner",
+      );
+      expect(await readFile(f.path)).toEqual(before);
+      expect(await readFile(f.config.data_dir + "/post.sqlite")).toEqual(db);
+    } finally {
+      await f.close();
+    }
+  });
+
 for (const stage of ["staged", "committed"] as const)
   test(`explicit SIGKILL at ${stage} conversion retains an authenticated authority and reruns without replay`, async () => {
     const f = await fixture();

@@ -44,10 +44,17 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
   let service: Service | undefined;
   try {
     const binding = s.config.bindings[0]!;
+    const matrixScopes = binding.scopes.filter(
+      (s) => s.account_id === "matrix-main",
+    );
+    binding.account_ids = ["qq-main"];
+    binding.scopes = binding.scopes.filter((s) => s.account_id === "qq-main");
     s.config.bindings.push({
       ...binding,
       id: "second",
       agent_id: "second",
+      account_ids: ["matrix-main"],
+      scopes: matrixScopes,
     });
     s.config.agents.push({
       id: "second",
@@ -61,7 +68,12 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
     ready(service);
     await service.observe("qq-main", event("once"));
     await service.observe("qq-main", event("once"));
-    expect(({ n: await count(store.db, "messages") } as any).n).toBe(1);
+    await service.observe("matrix-main", {
+      ...event("once"),
+      conversation_native_id: "!room:fixture",
+      mentions: ["@post:fixture"],
+    });
+    expect(({ n: await count(store.db, "messages") } as any).n).toBe(2);
     expect(({ n: await count(store.db, "deliveries") } as any).n).toBe(2);
     const body = (
       store.db

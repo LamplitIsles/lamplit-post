@@ -6,6 +6,7 @@ import { Settings } from "./settings";
 import { Fault, need } from "./errors";
 import { isShareURL } from "./config";
 import { MatrixUserBot } from "./matrix";
+import { QQPlatform } from "./host";
 import QRCode from "qrcode";
 import { ConfigSchema } from "./config";
 import { verifyMatrix } from "./matrix-draft";
@@ -49,6 +50,7 @@ export async function serveSettings(
     "invalid_request",
   );
   const admin = new Admin();
+  await admin.open(cfg.admin_file);
   const jobs = new Set<Promise<void>>();
   let closing = false;
   let stopping: Promise<void> | undefined;
@@ -143,7 +145,7 @@ export async function serveSettings(
             return send(200, { csrf: session.csrf });
           if (path === "/api/logout" && method === "POST") {
             if (qq?.owner === token) await cancelQQ();
-            admin.sessions.delete(token);
+            await admin.logout(token);
             res.setHeader(
               "Set-Cookie",
               "post_admin=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0",
@@ -227,20 +229,29 @@ export async function serveSettings(
                 ),
               "invalid_request",
             );
-            const account = ConfigSchema.shape.accounts.element.parse(
+            const proposed = ConfigSchema.shape.accounts.element.parse(
               input.account,
             );
+            need(
+              !settings.config.accounts.some(
+                (a) =>
+                  a.id !== proposed.id &&
+                  a.platform === proposed.platform &&
+                  a.native_id === proposed.native_id,
+              ),
+              "invalid_request",
+            );
+            const account = {
+              ...proposed,
+              id: settings.verifiedDraftId(
+                proposed.platform,
+                proposed.native_id,
+                proposed.id,
+              ),
+            };
             need(account.platform === "matrix", "invalid_request");
             need(!settings.status().busy, "conflict");
-            const next = ConfigSchema.parse({
-              ...settings.config,
-              accounts: [
-                ...settings.config.accounts.filter((a) => a.id !== account.id),
-                account,
-              ],
-            });
-            if (settings.config.accounts.some((a) => a.id === account.id))
-              settings.validate(next);
+            settings.validateAccount(account);
             need(
               input.credential === undefined ||
                 (typeof input.credential === "string" &&
@@ -278,15 +289,7 @@ export async function serveSettings(
                     account.id,
                   );
                   const normalized = { ...account, id };
-                  settings.validate(
-                    ConfigSchema.parse({
-                      ...settings.config,
-                      accounts: [
-                        ...settings.config.accounts.filter((a) => a.id !== id),
-                        normalized,
-                      ],
-                    }),
-                  );
+                  settings.validateAccount(normalized);
                   return normalized;
                 },
               ),
@@ -463,9 +466,35 @@ export async function serveSettings(
                     conversation_id: r.id,
                     native_id: r.native,
                     type: r.type,
-                    name: r.name ?? r.native,
+                    name: r.name ?? undefined,
                     source: r.observed ? "observed" : "configured",
                   }));
+                if (platform instanceof QQPlatform) {
+                  const signal = AbortSignal.any([
+                    service.signal(controller.signal),
+                    AbortSignal.timeout(
+                      Math.min(settings.config.timeout_ms, 8000),
+                    ),
+                  ]);
+                  // This explicit refresh enriches known groups, never enumerates a directory.
+                  for (const item of observed
+                    .filter((c) => c.type === "group")
+                    .slice(0, 20)) {
+                    if (signal.aborted) break;
+                    const name = await service
+                      .track(platform.groupName(String(item.native_id), signal))
+                      .catch(() => undefined);
+                    if (signal.aborted) break;
+                    if (name) {
+                      settings.store.db
+                        .prepare(
+                          "UPDATE conversations SET name=? WHERE account=? AND id=?",
+                        )
+                        .run(name, account.id, item.conversation_id);
+                      item.name = name;
+                    }
+                  }
+                }
                 if (!(platform instanceof MatrixUserBot))
                   return {
                     items: observed,

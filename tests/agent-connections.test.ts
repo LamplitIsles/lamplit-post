@@ -189,7 +189,7 @@ test("owned caller Matrix then QQ zero-grant association, observed candidates th
         .all(),
     ).toEqual(pins);
     v = editable(await view());
-    v.bindings = [];
+    v.bindings = v.bindings.map((b: any) => ({ ...b, scopes: [] }));
     await save(v);
     expect((await view()).agents[0].hasToken).toBe(true);
     expect(await f.app.store.secret("one-receiver", "one", "receiver")).toBe(
@@ -228,6 +228,8 @@ test("connection rotation authenticates both SDK channels, changed destination h
       ...structuredClone(v.bindings[0]),
       id: "other-binding",
       agent_id: "other",
+      account_ids: [],
+      scopes: [],
     });
     expect(
       (
@@ -248,7 +250,7 @@ test("connection rotation authenticates both SDK channels, changed destination h
     v = editable(await f.app.view());
     // Existing pending recipient stays byte-identical when agent URL changes.
     f.platform.sendQQ("GROUP_AT_MESSAGE_CREATE", "before rotation");
-    await until(() => f.receiver.attempts.length >= 2);
+    await until(() => f.receiver.attempts.length === 1);
     const immutable = f.app.store.db
       .prepare(
         "SELECT id,receiver,body FROM deliveries WHERE agent='cfl' LIMIT 1",

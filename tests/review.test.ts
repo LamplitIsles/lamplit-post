@@ -58,6 +58,7 @@ test("QQ private peer admission protects history, assets and send while retainin
     const b = structuredClone(s.config.bindings[0]!);
     b.id = "other-binding";
     b.agent_id = "other";
+    b.account_ids = [];
     s.config.agents.push({
       id: "other",
       receiver_url: s.config.agents[0]!.receiver_url,
@@ -146,11 +147,7 @@ test("QQ private peer admission protects history, assets and send while retainin
       name: "list_conversations",
       arguments: { account_id: "qq-main" },
     });
-    expect(
-      (listed.structuredContent as any).items.map(
-        (c: any) => c.conversation_id,
-      ),
-    ).toEqual(["qq-group"]);
+    expect(listed.isError).toBe(true);
     expect(
       (
         await fetch(f.r.http.url + asset.download_path, {

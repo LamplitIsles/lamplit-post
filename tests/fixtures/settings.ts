@@ -9,6 +9,7 @@ import { stateFixture, until } from "./state";
 import { consumerFixture } from "./consumer";
 import type { startQrConnect } from "@tencent-connect/qqbot-connector";
 import { Store } from "../../src/store";
+import { ConfigSchema, type Config } from "../../src/config";
 async function port() {
   const s = createServer();
   await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
@@ -22,12 +23,13 @@ export async function settingsFixture(
   connector?: typeof startQrConnect,
   qrLifetime?: number,
   staticRoot?: string,
+  configure?: (config: Config) => Config,
 ) {
   const platform = await platformsFixture(),
     receiver = await consumerFixture(false),
     state = await stateFixture(platform.url, receiver.url, timeout);
   const p = await port();
-  const config = {
+  const initial = {
     ...state.config,
     settings: {
       port: p,
@@ -36,6 +38,28 @@ export async function settingsFixture(
     },
     ...(empty ? { accounts: [], agents: [], bindings: [] } : {}),
   };
+  const parsed = ConfigSchema.parse(configure ? configure(initial) : initial);
+  if (!parsed.settings)
+    throw new Error("Owned settings fixture requires its management listener");
+  const config = { ...parsed, settings: parsed.settings };
+  if (configure) {
+    const bootstrap = await Store.open(config);
+    try {
+      for (const a of config.agents.filter(
+        (a) => !state.config.agents.some((old) => old.id === a.id),
+      )) {
+        await bootstrap.putSecret(
+          a.receiver_credential,
+          a.id,
+          "receiver",
+          "test-receiver",
+        );
+        await bootstrap.issue(a.id);
+      }
+    } finally {
+      await bootstrap.close();
+    }
+  }
   const path = state.dir + "/post.toml";
   await writeFile(path, stringify(config), { mode: 0o600 });
   await provisionAdmin(config.settings.admin_file, "owned-fixture-password");

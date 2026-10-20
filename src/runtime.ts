@@ -43,6 +43,7 @@ export class Application {
       await this.service.startDispatch();
       this.checkStarting();
       this.http = await serve(this.service);
+      await this.service.status(true);
       this.checkStarting();
     })());
   }
