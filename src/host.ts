@@ -98,7 +98,9 @@ export class Host {
             protocol: "websocket",
             intents: (1 << 25) | (1 << 30),
             retryWhen: [],
-            retryTimes: 0,
+            // Core's first established socket retains its initial-attempt close path.
+            // Allow it to enter connection recovery; outgoing retries stay disabled.
+            retryTimes: 1,
             retryInterval: 1000,
             retryLazy: 1000,
             endpoint: this.fixture.qqOrigin ?? "https://api.bot.qq.com",

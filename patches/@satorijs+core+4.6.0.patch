@@ -1,0 +1,308 @@
+diff --git a/node_modules/@satorijs/core/lib/index.cjs b/node_modules/@satorijs/core/lib/index.cjs
+index fe20fd0..6175b90 100644
+--- a/node_modules/@satorijs/core/lib/index.cjs
++++ b/node_modules/@satorijs/core/lib/index.cjs
+@@ -614,7 +614,11 @@ var Adapter = class {
+     }
+     socket;
+     connectionId = 0;
++    retryTimer;
++    pending = new Set();
++    sockets = new Map();
+     async start() {
++      clearTimeout(this.retryTimer);
+       let retryCount = 0;
+       const connectionId = ++this.connectionId;
+       const logger = this.ctx.logger("adapter");
+@@ -632,9 +636,10 @@ var Adapter = class {
+         retryCount++;
+         this.setStatus(import_protocol3.Status.RECONNECT);
+         logger.warn(`${message}, will retry in ${import_cosmokit4.Time.format(timeout)}...`);
+-        setTimeout(() => {
++        this.retryTimer = setTimeout(() => {
++          this.retryTimer = void 0;
+           if (!this.getActive() || connectionId !== this.connectionId) return;
+-          connect();
++          launch();
+         }, timeout);
+       }, "reconnect");
+       const connect = /* @__PURE__ */ __name(async (initial = false) => {
+@@ -646,6 +651,13 @@ var Adapter = class {
+           reconnect(initial, error.toString() || `failed to prepare websocket`);
+           return;
+         }
++        const closed = new Promise((resolve) => {
++          socket.addEventListener("close", () => {
++            this.sockets.delete(socket);
++            resolve();
++          });
++        });
++        this.sockets.set(socket, closed);
+         const url = socket.url.replace(/\?.+/, "");
+         socket.addEventListener("error", (event) => {
+           if (event.message) logger.warn(event.message);
+@@ -656,16 +668,39 @@ var Adapter = class {
+           reconnect(initial, reason.toString() || `failed to connect to ${url}, code: ${code}`);
+         });
+         socket.addEventListener("open", () => {
++          if (!this.getActive() || connectionId !== this.connectionId) {
++            socket.close();
++            return;
++          }
+           retryCount = 0;
+           this.socket = socket;
+           logger.info("connect to server: %c", url);
+           this.accept(socket);
+         });
++        if (!this.getActive() || connectionId !== this.connectionId) socket.close();
+       }, "connect");
+-      connect(true);
++      const launch = (initial = false) => {
++        const task = connect(initial);
++        this.pending.add(task);
++        void task.finally(() => this.pending.delete(task)).catch(() => {});
++        return task;
++      };
++      return launch(true);
+     }
+     async stop() {
+-      this.socket?.close();
++      ++this.connectionId;
++      clearTimeout(this.retryTimer);
++      this.retryTimer = void 0;
++      await Promise.allSettled([...this.pending]);
++      await Promise.all([...this.sockets].map(async ([socket, closed]) => {
++        const timer = setTimeout(() => socket.terminate?.(), 1000);
++        try {
++          socket.close();
++          await closed;
++        } finally {
++          clearTimeout(timer);
++        }
++      }));
+     }
+   }
+   Adapter2.WsClientBase = WsClientBase;
+@@ -687,10 +722,10 @@ var Adapter = class {
+       this.bot.error = error;
+     }
+     async connect(bot) {
+-      this.start();
++      return this.start();
+     }
+     async disconnect(bot) {
+-      this.stop();
++      return this.stop();
+     }
+   }
+   Adapter2.WsClient = WsClient;
+diff --git a/node_modules/@satorijs/core/lib/index.mjs b/node_modules/@satorijs/core/lib/index.mjs
+index c1c4e02..8b79fee 100644
+--- a/node_modules/@satorijs/core/lib/index.mjs
++++ b/node_modules/@satorijs/core/lib/index.mjs
+@@ -564,7 +564,11 @@ var Adapter = class {
+     }
+     socket;
+     connectionId = 0;
++    retryTimer;
++    pending = new Set();
++    sockets = new Map();
+     async start() {
++      clearTimeout(this.retryTimer);
+       let retryCount = 0;
+       const connectionId = ++this.connectionId;
+       const logger = this.ctx.logger("adapter");
+@@ -582,9 +586,10 @@ var Adapter = class {
+         retryCount++;
+         this.setStatus(Status2.RECONNECT);
+         logger.warn(`${message}, will retry in ${Time.format(timeout)}...`);
+-        setTimeout(() => {
++        this.retryTimer = setTimeout(() => {
++          this.retryTimer = void 0;
+           if (!this.getActive() || connectionId !== this.connectionId) return;
+-          connect();
++          launch();
+         }, timeout);
+       }, "reconnect");
+       const connect = /* @__PURE__ */ __name(async (initial = false) => {
+@@ -596,6 +601,13 @@ var Adapter = class {
+           reconnect(initial, error.toString() || `failed to prepare websocket`);
+           return;
+         }
++        const closed = new Promise((resolve) => {
++          socket.addEventListener("close", () => {
++            this.sockets.delete(socket);
++            resolve();
++          });
++        });
++        this.sockets.set(socket, closed);
+         const url = socket.url.replace(/\?.+/, "");
+         socket.addEventListener("error", (event) => {
+           if (event.message) logger.warn(event.message);
+@@ -606,16 +618,39 @@ var Adapter = class {
+           reconnect(initial, reason.toString() || `failed to connect to ${url}, code: ${code}`);
+         });
+         socket.addEventListener("open", () => {
++          if (!this.getActive() || connectionId !== this.connectionId) {
++            socket.close();
++            return;
++          }
+           retryCount = 0;
+           this.socket = socket;
+           logger.info("connect to server: %c", url);
+           this.accept(socket);
+         });
++        if (!this.getActive() || connectionId !== this.connectionId) socket.close();
+       }, "connect");
+-      connect(true);
++      const launch = (initial = false) => {
++        const task = connect(initial);
++        this.pending.add(task);
++        void task.finally(() => this.pending.delete(task)).catch(() => {});
++        return task;
++      };
++      return launch(true);
+     }
+     async stop() {
+-      this.socket?.close();
++      ++this.connectionId;
++      clearTimeout(this.retryTimer);
++      this.retryTimer = void 0;
++      await Promise.allSettled([...this.pending]);
++      await Promise.all([...this.sockets].map(async ([socket, closed]) => {
++        const timer = setTimeout(() => socket.terminate?.(), 1000);
++        try {
++          socket.close();
++          await closed;
++        } finally {
++          clearTimeout(timer);
++        }
++      }));
+     }
+   }
+   Adapter2.WsClientBase = WsClientBase;
+@@ -637,10 +672,10 @@ var Adapter = class {
+       this.bot.error = error;
+     }
+     async connect(bot) {
+-      this.start();
++      return this.start();
+     }
+     async disconnect(bot) {
+-      this.stop();
++      return this.stop();
+     }
+   }
+   Adapter2.WsClient = WsClient;
+diff --git a/node_modules/@satorijs/core/src/adapter.ts b/node_modules/@satorijs/core/src/adapter.ts
+index 4104daa..b940a2e 100644
+--- a/node_modules/@satorijs/core/src/adapter.ts
++++ b/node_modules/@satorijs/core/src/adapter.ts
+@@ -37,6 +37,9 @@ export namespace Adapter {
+   export abstract class WsClientBase<C extends Context, B extends Bot<C>> extends Adapter<C, B> {
+     protected socket?: WebSocket
+     protected connectionId = 0
++    protected retryTimer?: ReturnType<typeof setTimeout>
++    protected pending = new Set<Promise<void>>()
++    protected sockets = new Map<WebSocket, Promise<void>>()
+ 
+     protected abstract prepare(): Awaitable<WebSocket>
+     protected abstract accept(socket: WebSocket): void
+@@ -48,6 +51,7 @@ export namespace Adapter {
+     }
+ 
+     async start() {
++      clearTimeout(this.retryTimer)
+       let retryCount = 0
+       const connectionId = ++this.connectionId
+       const logger = this.ctx.logger('adapter')
+@@ -68,9 +72,10 @@ export namespace Adapter {
+         retryCount++
+         this.setStatus(Status.RECONNECT)
+         logger.warn(`${message}, will retry in ${Time.format(timeout)}...`)
+-        setTimeout(() => {
++        this.retryTimer = setTimeout(() => {
++          this.retryTimer = undefined
+           if (!this.getActive() || connectionId !== this.connectionId) return
+-          connect()
++          launch()
+         }, timeout)
+       }
+ 
+@@ -84,6 +89,14 @@ export namespace Adapter {
+           return
+         }
+ 
++        const closed = new Promise<void>((resolve) => {
++          socket.addEventListener('close', () => {
++            this.sockets.delete(socket)
++            resolve()
++          })
++        })
++        this.sockets.set(socket, closed)
++
+         // remove query args to protect privacy
+         const url = socket.url.replace(/\?.+/, '')
+ 
+@@ -98,18 +111,45 @@ export namespace Adapter {
+         })
+ 
+         socket.addEventListener('open', () => {
++          if (!this.getActive() || connectionId !== this.connectionId) {
++            socket.close()
++            return
++          }
+           retryCount = 0
+           this.socket = socket
+           logger.info('connect to server: %c', url)
+           this.accept(socket)
+         })
++        if (!this.getActive() || connectionId !== this.connectionId) socket.close()
+       }
+ 
+-      connect(true)
++      const launch = (initial = false) => {
++        const task = connect(initial)
++        this.pending.add(task)
++        void task.finally(() => this.pending.delete(task)).catch(() => {})
++        return task
++      }
++      return launch(true)
+     }
+ 
+     async stop() {
+-      this.socket?.close()
++      ++this.connectionId
++      clearTimeout(this.retryTimer)
++      this.retryTimer = undefined
++      // The owner cancels native prepare I/O before awaiting adapter disposal.
++      await Promise.allSettled([...this.pending])
++      await Promise.all([...this.sockets].map(async ([socket, closed]) => {
++        // Match Post's existing one-second socket retirement bound.
++        const timer = setTimeout(() => {
++          ;(socket as WebSocket & { terminate?: () => void }).terminate?.()
++        }, 1000)
++        try {
++          socket.close()
++          await closed
++        } finally {
++          clearTimeout(timer)
++        }
++      }))
+     }
+   }
+ 
+@@ -131,11 +171,11 @@ export namespace Adapter {
+     }
+ 
+     async connect(bot: B) {
+-      this.start()
++      return this.start()
+     }
+ 
+     async disconnect(bot: B) {
+-      this.stop()
++      return this.stop()
+     }
+   }
+ }

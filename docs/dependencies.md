@@ -82,3 +82,38 @@ cancel, terminal-before-close, unrelated-request isolation and unsubscribe. The
 describes the public request field/emission; latest24.x documentation is not proof
 for a different runtime build. Runtime upgrades require rechecking this ownership
 seam; no stable built-in-channel contract or real QQ scan acceptance is claimed.
+
+## QQ first-disconnect recovery and Satori4.6.0 retirement
+
+Post sets the QQ public connection `retryTimes` to1, retaining the existing1000ms
+retry intervals and `retryWhen: []` for outgoing messages. Core4.6.0's first
+established WebSocket retains its initial-attempt close callback; with retryTimes0,
+a normal close immediately puts the bot OFFLINE and disables connection recovery.
+The owned real-SDK regression establishes ready → close1000 → degraded → second
+connection → ready, with Matrix remaining ready and fresh inbound capture restored.
+This proves the local recovery defect, not why an actual upstream connection closed.
+The observed one-hour live disconnect's initiating cause remains unknown. Connection
+recovery never retries a native send or replays an unresolved submission.
+
+Enabling connection retries exposed a referenced retry timer remaining after stop.
+An owned native-prepare cancellation probe also proved a preexisting gap: stop
+returned and released the lease before actual prepare settlement. The exact patch
+`patches/@satorijs+core+4.6.0.patch` repairs only WsClientBase lifecycle ownership
+in shipped CommonJS/ESM and corresponding source. It owns/clears the retry timer,
+tracks actual prepare attempts, invalidates their generation on stop, checks activity
+and generation after prepare and on open, and drains connecting/open sockets.
+The existing Post one-second socket retirement bound is retained using Node ws's
+public terminate method after graceful close. connect/disconnect return their actual
+start/stop promises. Post cancels native I/O before awaiting adapter disposal; the
+patch does not invent a second reconnect loop or replace Post's operation deadlines.
+
+Regression probes use owned homes/state/key and loopback endpoints, the real public
+Host/SDK, actual native cancellation held at settlement, and natural subprocess exit.
+They cover stop during scheduled retry, pending reconnect/startup prepare, initial
+unreachable gateway under the existing startup budget, and cancellation at socket
+creation. No private SDK field wrapper, global timer hook, unref or forced successful
+exit is used. Normal production npm ci applies both exact patches; revision.json adds
+satori_patch_sha256 while preserving the existing Matrix patch hash, and the artifact
+manifest inventories actual patched dependency bytes. Satori remains MIT licensed.
+Upstream repository: https://github.com/satorijs/satori (pinned installed4.6.0
+includes src/adapter.ts).

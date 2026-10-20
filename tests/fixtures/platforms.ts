@@ -24,6 +24,7 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
   let matrixReadDelay = 0;
   let permission = false,
     tokenStall = false,
+    gatewayStall = false,
     failureStatus = 500;
   let failureCode: number | string = 500,
     failureMessage = "test failure";
@@ -67,6 +68,14 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     child.once("message", (m: any) => resolve(m.port));
     child.once("error", reject);
   });
+  let qqConnections = 0,
+    qqAttempts = 0;
+  const qqCloses: number[] = [];
+  child.on("message", (m: any) => {
+    if (m.connected) qqConnections++;
+    if (m.attempt) qqAttempts++;
+    if (m.closed !== undefined) qqCloses.push(m.closed);
+  });
   const server = await httpFixture(async (req) => {
     const u = new URL(req.url),
       path = u.pathname;
@@ -97,6 +106,17 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
       return json({ access_token: "qq-transport-secret", expires_in: 3600 });
     if (path === "/users/@me")
       return json({ id: "qq-user", username: "Test Bot" });
+    if (path === "/gateway" && gatewayStall)
+      return new Promise<Response>((resolve) =>
+        req.signal.addEventListener(
+          "abort",
+          () => {
+            aborts++;
+            resolve(new Response(null, { status: 499 }));
+          },
+          { once: true },
+        ),
+      );
     if (path === "/gateway")
       return json({ url: `ws://127.0.0.1:${gatewayPort}` });
     if (path.startsWith("/v2/groups/") && path.endsWith("/info")) {
@@ -334,6 +354,29 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
   });
   return {
     calls,
+    get qqAttempts() {
+      return qqAttempts;
+    },
+    async rejectQQConnections() {
+      const configured = new Promise<void>((r) => {
+        function listen(m: any) {
+          if (m.configured) {
+            child.off("message", listen);
+            r();
+          }
+        }
+        child.on("message", listen);
+      });
+      child.send({ rejectConnections: true });
+      await configured;
+    },
+    get qqConnections() {
+      return qqConnections;
+    },
+    qqCloses,
+    disconnectQQ() {
+      child.send({ disconnect: true });
+    },
     delayMatrixReads(ms: number) {
       matrixReadDelay = ms;
     },
@@ -417,6 +460,9 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     },
     get aborts() {
       return aborts;
+    },
+    gatewayStall(v: boolean) {
+      gatewayStall = v;
     },
     tokenStall(v: boolean) {
       tokenStall = v;

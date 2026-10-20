@@ -55,6 +55,9 @@ const manifest = {
   sdk_patch_sha256: createHash("sha256")
     .update(await readFile("patches/matrix-js-sdk+44.0.0.patch"))
     .digest("hex"),
+  satori_patch_sha256: createHash("sha256")
+    .update(await readFile("patches/@satorijs+core+4.6.0.patch"))
+    .digest("hex"),
   consumer_contract:
     "contracts/v1 (sha256 " +
     createHash("sha256")
