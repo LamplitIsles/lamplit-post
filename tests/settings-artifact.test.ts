@@ -33,6 +33,7 @@ test("extracted artifact provisions separate admin, serves complete local UI, ap
     master_key_file: join(dir, "master.key"),
     port: 0,
     accounts: [],
+    agents: [],
     bindings: [],
     settings: { port, origin, admin_file: join(dir, "admin.json") },
   };
@@ -95,18 +96,15 @@ test("extracted artifact provisions separate admin, serves complete local UI, ap
       body: JSON.stringify({
         version: view.version,
         accounts: [],
-        bindings: [
+        agents: [
           {
             id: "artifact",
-            agent_id: "artifact",
             name: "Artifact",
-            enabled: true,
             receiver_url: "http://127.0.0.1:1",
             receiver_credential: "receiver",
-            scopes: [],
-            wake: {},
           },
         ],
+        bindings: [],
         secrets: [
           {
             ref: "receiver",
@@ -146,7 +144,7 @@ test("extracted artifact provisions separate admin, serves complete local UI, ap
             headers: { Cookie: newCookie },
           })
         ).json()
-      ).bindings[0].agent_id,
+      ).agents[0].id,
     ).toBe("artifact");
     expect(serving.out + serving.err).not.toContain("artifact-owned-password");
     expect(serving.out + serving.err).not.toContain(receiverSecret);

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { fileTypeFromBuffer } from "file-type";
 import { loadConfig, privateFile } from "./config";
+import { convertConnections } from "./convert-connections";
 import { Store } from "./store";
 import { Application } from "./runtime";
 import { Settings } from "./settings";
@@ -10,6 +11,7 @@ import { provisionAdmin } from "./admin";
 const help = `Lamplit Post v1 (Node 24)
 post <command> --config FILE
   admin-provision   Read administrator password from stdin (12+ characters), offline
+  connections-convert  Explicit offline conversion of binding-owned receivers
   config-check      Validate one Post TOML document without creating state
   credential-put --ref REF --account ID --kind platform|receiver
                     Read secret from stdin; store authenticated ciphertext offline
@@ -40,6 +42,7 @@ export async function main(argv = process.argv.slice(2)) {
   });
   const allowed: Record<string, string[]> = {
     "config-check": ["config"],
+    "connections-convert": ["config"],
     serve: ["config"],
     status: ["config"],
     "admin-provision": ["config"],
@@ -95,8 +98,12 @@ export async function main(argv = process.argv.slice(2)) {
     (!v.ref || !v.account || !["platform", "receiver"].includes(v.kind ?? ""))
   )
     throw new Error("Credential fields required");
+  if (command === "connections-convert") {
+    console.log(JSON.stringify(await convertConnections(v.config)));
+    return;
+  }
   const config = await loadConfig(v.config);
-  if (v.agent && !config.bindings.some((b) => b.agent_id === v.agent))
+  if (v.agent && !config.agents.some((a) => a.id === v.agent))
     throw new Error("Agent not configured");
   if (command === "config-check") {
     console.log(JSON.stringify({ valid: true }));
@@ -171,7 +178,7 @@ export async function main(argv = process.argv.slice(2)) {
         ? config.accounts.some(
             (a) => a.id === v.account && a.credential === v.ref,
           )
-        : config.bindings.some(
+        : config.agents.some(
             (b) => b.id === v.account && b.receiver_credential === v.ref,
           );
     if (!matched || process.stdin.isTTY)

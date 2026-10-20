@@ -23,7 +23,10 @@ export class Store {
   }
   db: DatabaseSync;
   owner: Ownership;
-  constructor(public config: Config) {
+  constructor(
+    public config: Config,
+    mode: "runtime" | "offline-conversion" = "runtime",
+  ) {
     this.owner = new Ownership(config);
     let db: DatabaseSync | undefined;
     try {
@@ -50,8 +53,10 @@ export class Store {
         db.exec("PRAGMA application_id=1347375956; PRAGMA user_version=2;");
         db.exec(schema);
       }
-      chmodSync(join(config.data_dir, "post.sqlite"), 0o600);
-      this.initialize();
+      if (mode === "runtime") {
+        chmodSync(join(config.data_dir, "post.sqlite"), 0o600);
+        this.initialize();
+      }
     } catch (e) {
       db?.close();
       this.owner.close();
@@ -158,7 +163,7 @@ export class Store {
 
   async issue(agent: string) {
     need(
-      this.config.bindings.some((b) => b.agent_id === agent),
+      this.config.agents.some((a) => a.id === agent),
       "invalid_request",
     );
     const token = randomBytes(32).toString("base64url");
@@ -184,10 +189,7 @@ export class Store {
     if (this.owner.closed) return undefined;
     const value = digest(token);
     for (const [agent, hash] of this.tokens)
-      if (
-        hash === value &&
-        this.config.bindings.some((b) => b.agent_id === agent && b.enabled)
-      )
+      if (hash === value && this.config.agents.some((a) => a.id === agent))
         return agent;
   }
   async pin(account: string, platform: string, native: string) {

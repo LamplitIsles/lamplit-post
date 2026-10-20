@@ -13,6 +13,7 @@ master_key_file = "./master.key"
 hostname = "127.0.0.1"
 port = 18787
 accounts = []
+agents = []
 bindings = []
 
 [settings]
@@ -48,8 +49,11 @@ receiver URL and separate receiver Bearer secret. There is no external catalogue
 or fabricated agent list. Registration starts with zero grants. Explicitly issue
 a machine token in consumer connection settings; it is shown once and rotates
 any previous token. Copy it directly to the intended consumer's private secret
-store. The browser session does not authorize machine MCP/assets, and an agent
-Bearer cannot administer Post.
+store. A registered agent token can list an empty account set before any binding
+is added or after the final binding is removed. Identity alone does not permit raw
+uploads, history, sends or asset reads: those retain grant checks. Fully paused
+bindings still deny machine HTTP access. The browser session does not authorize
+machine MCP/assets, and an agent Bearer cannot administer Post.
 
 Choose an existing shared account or add an account. QQ's primary path is **扫码连接 QQ**:
 scan the provider authorization QR in mobile QQ, then explicitly confirm the account,
@@ -77,9 +81,9 @@ operation deadline and retire all request I/O before releasing ownership.
 Grant chats, then configure wake rules separately. QQ candidates distinguish locally
 observed conversations from configured pins, not a complete upstream directory. Manual
 native IDs are explicit and are not claims of verification. Private conversations still
-require explicit peer IDs. Room visibility is not an agent grant. A new binding needs
-its own receiver credential; missing required values are explained near Next and the
-consumer fields can be revealed directly. Required inputs remain scrollable on short
+require explicit peer IDs. Room visibility is not an agent grant. The independent consumer connection owns one receiver URL and write-only secret per
+agent; chat bindings never ask for them. Edit the consumer connection outside the
+chat wizard; a blank secret preserves the existing one. Cancelling discards the draft. Required inputs remain scrollable on short
 normal-zoom desktop/mobile viewports, without a footer painted over them.
 
 Save first validates optimistic version, references and immutable pins, closes old
@@ -142,7 +146,7 @@ production Matrix latency or original live save outcome, both still unknown.
 
 Cancel discards a draft. Pause removes agent access and cancels ineligible queued
 wakes during admission rechecks. Unbind revokes that connection's scopes without
-deleting history; the final empty binding retains the registered consumer. No
+deleting history; removing the final binding retains the independent consumer connection and token. No
 unknown send is automatically repeated. Delivery snapshots retain original
 bodies/destinations, including across receiver edits and restart.
 
@@ -201,3 +205,27 @@ acceptance; no live account, deployment or installed service is involved.
 If a newly verified account fails later during startup, rollback preserves its immutable identity and conversation pins. Discarding the wizard or reloading does not delete those pins. A subsequent successful Matrix identity check or QQ credential authorization can recover the original account ID only when that ID is absent from the current configuration. Candidates reuse existing conversation IDs. Configured accounts must be selected explicitly and retain their identity, homeserver and credential reference guards. Recovery does not restore grants, attach historical vault references, issue tokens or reveal secrets: supply a current credential and explicitly save the desired scope again. The submitted wizard draft remains available through terminal apply failure; success or explicit cancellation clears its credentials.
 
 The exact Matrix44 vendor patch also prevents late SDK startup and capability/keepalive polling after cancellation. It preserves the original timeoutSignal hunk and all native deadlines. Native body retirement remains owned by Post; cancelled-start public-SDK and application probes must exit naturally before cleanup is accepted. See `docs/dependencies.md` for the patch boundary.
+
+Account associations are explicit and remain visible with zero chat grants. Globally
+connected accounts are not automatically associated with an agent; an authorized QQ
+draft is awaiting save, not connected. Editing one account in a shared binding keeps
+the other accounts and scopes. Collapsed rows show only platform icons, account names, essential status and
+**详情与编辑**. Expand it for all chat scope/name details, native IDs, wake rules,
+sharing and actions.
+
+Matrix room names are display metadata in the existing conversation store. Selection
+saves bounded labels for selected rooms; reload needs no upstream lookup. IDs and
+pins remain authoritative. Successful explicit Matrix verification also refreshes
+matching selected labels; other accounts and grant fields remain unchanged. Missing
+names fall back to IDs. There is no name polling.
+
+QQ search is the locally observed/configured directory, not a complete upstream
+QQ group list. Save/connect the bot first, add it to the group and @mention it there,
+then refresh available chats and explicitly select a grant. Receiving that event
+only creates an observed candidate; it does not authorize or wake any agent. Search
+by available name or this App's scoped openid, not the public numeric group number.
+Unsaved authorization drafts cannot receive these events. Transport errors and an
+empty local list are separate states. The exact main QQBot4.14 adapter has no
+getGuildList; its QQGuildBot sibling lists channels, not QQ groups. This does not
+assert that Tencent has no other APIs. The supported event includes group_openid:
+[official native mention event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html).

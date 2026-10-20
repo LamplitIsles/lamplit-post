@@ -577,6 +577,7 @@ a {
   min-width: 0;
 }
 .account-identity > div {
+  flex: 1;
   min-width: 0;
 }
 .binding-heading {
@@ -606,4 +607,23 @@ a {
   text-decoration: underline;
   cursor: pointer;
   font-weight: 550;
+}
+
+/* Keep long platform labels secondary and every editor reachable at normal zoom. */
+.connection-dialog {
+  max-height: 90dvh;
+  overflow-y: auto;
+}
+.binding-details dd,
+.binding-details small,
+.editor-body dd {
+  overflow-wrap: anywhere;
+}
+.editor-body dd small {
+  display: block;
+  color: var(--muted-foreground);
+}
+.chat-label > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }

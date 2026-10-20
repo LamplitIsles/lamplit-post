@@ -36,6 +36,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       ],
       bindings: state.config.bindings.map((binding) => ({
         ...binding,
+        account_ids: ["matrix-main"],
         scopes: binding.scopes.filter((s) => s.account_id === "matrix-main"),
       })),
       settings: {
@@ -90,12 +91,24 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         child.stdout?.on("data", (chunk) => (output += chunk));
         child.stderr?.resume();
         child.once("error", () =>
-          reject(new Error("Owned browser action failed: " + args[0])),
+          reject(
+            new Error(
+              "Owned browser action failed: " +
+                args[0] +
+                (args[0] === "find" ? " " + args.slice(1).join(" ") : ""),
+            ),
+          ),
         );
         child.once("close", (code) =>
           code === 0
             ? resolve(output.trim())
-            : reject(new Error("Owned browser action failed: " + args[0])),
+            : reject(
+                new Error(
+                  "Owned browser action failed: " +
+                    args[0] +
+                    (args[0] === "find" ? " " + args.slice(1).join(" ") : ""),
+                ),
+              ),
         );
       });
     }
@@ -110,9 +123,24 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       }
       return value;
     }
-    const click = (name: string) =>
-      browser(["find", "role", "button", "click", "--name", name, "--exact"]);
-    const wait = (script: string) => browser(["wait", "--fn", script]);
+    const click = async (name: string) => {
+      await evaluate(
+        "Promise.all(document.getAnimations().filter(a=>a.playState==='running').map(a=>a.finished.catch(()=>{})))",
+      );
+      if (name === "编辑绑定")
+        await evaluate("document.querySelector('.binding-details').open=true");
+      return browser([
+        "find",
+        "role",
+        "button",
+        "click",
+        "--name",
+        name,
+        "--exact",
+      ]);
+    };
+    const wait = (script: string) =>
+      browser(["wait", "--fn", script, "--timeout", "4000"]);
     let child: ReturnType<typeof run> | undefined;
     try {
       expect(
@@ -221,7 +249,14 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
             c.path.endsWith("/whoami") && c.auth === "Bearer " + replacementA,
         ),
       ).toBe(false);
-      await browser(["click", ".guide > summary"]);
+      await evaluate(
+        "Promise.all(document.getAnimations().filter(a=>a.playState==='running').map(a=>a.finished.catch(()=>{})))",
+      );
+      if (!(await evaluate("document.querySelector('.guide').open"))) {
+        await browser(["focus", ".guide > summary"]);
+        await browser(["press", "Enter"]);
+      }
+      await wait("document.querySelector('.guide').open");
       await click("签发 / 替换 Agent token");
       await wait("!!document.querySelector('#once')");
       await evaluate(
@@ -304,12 +339,12 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         await reopened.close();
       }
       const persisted = parse(await readFile(path, "utf8")) as any;
-      expect(
-        persisted.bindings.some(
-          (binding: any) =>
-            binding.agent_id === "agent-b" && binding.scopes.length === 0,
-        ),
-      ).toBe(true);
+      expect(persisted.bindings[0].account_ids).toEqual([
+        "matrix-main",
+        "matrix-second",
+      ]);
+      expect(persisted.bindings[0].scopes).toEqual(config.bindings[0]!.scopes);
+      expect(persisted.agents.some((a: any) => a.id === "agent-b")).toBe(true);
       expect(JSON.stringify(persisted).includes(replacementA)).toBe(false);
     } finally {
       try {

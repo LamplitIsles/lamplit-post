@@ -85,15 +85,23 @@ export const ConfigSchema = z
             });
         }),
     ),
+    agents: z.array(
+      z
+        .object({
+          id,
+          name: z.string().min(1).max(128).optional(),
+          receiver_url: url,
+          receiver_credential: ref,
+        })
+        .strict(),
+    ),
     bindings: z.array(
       z
         .object({
           id,
           agent_id: id,
-          name: z.string().min(1).max(128).optional(),
+          account_ids: z.array(id),
           enabled: z.boolean().default(true),
-          receiver_url: url,
-          receiver_credential: ref,
           scopes: z.array(scope),
           wake: z
             .object({
@@ -128,7 +136,7 @@ export const ConfigSchema = z
           message: "Administrator credential must be independent",
         });
     }
-    for (const items of [v.accounts, v.bindings])
+    for (const items of [v.accounts, v.agents, v.bindings])
       if (new Set(items.map((x) => x.id)).size !== items.length)
         c.addIssue({ code: "custom", message: "Duplicate ID" });
     if (
@@ -138,12 +146,23 @@ export const ConfigSchema = z
       c.addIssue({ code: "custom", message: "Duplicate platform identity" });
     const refs = [
       ...v.accounts.map((a) => a.credential),
-      ...v.bindings.map((b) => b.receiver_credential),
+      ...v.agents.map((a) => a.receiver_credential),
     ];
     if (refs.includes("__keycheck"))
       c.addIssue({ code: "custom", message: "Reserved credential reference" });
     if (new Set(refs).size !== refs.length)
       c.addIssue({ code: "custom", message: "Credential refs must be unique" });
+    for (const b of v.bindings) {
+      if (
+        new Set(b.account_ids).size !== b.account_ids.length ||
+        b.account_ids.some((id) => !v.accounts.some((a) => a.id === id)) ||
+        b.scopes.some((s) => !b.account_ids.includes(s.account_id))
+      )
+        c.addIssue({ code: "custom", message: "Invalid account association" });
+    }
+    for (const b of v.bindings)
+      if (!v.agents.some((a) => a.id === b.agent_id))
+        c.addIssue({ code: "custom", message: "Unknown agent" });
     const conv = new Map<string, string>();
     const native = new Map<string, string>();
     const ids = new Map<string, string>();

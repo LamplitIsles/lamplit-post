@@ -5,8 +5,12 @@ import { settingsFixture } from "./fixtures/settings";
 
 const editable = (v: any) => ({
   version: v.version,
+  agents: v.agents.map(({ hasCredential, hasToken, ...a }: any) => a),
   accounts: v.accounts.map(({ hasCredential, ready, ...a }: any) => a),
-  bindings: v.bindings.map(({ hasCredential, hasToken, ...b }: any) => b),
+  bindings: v.bindings.map(({ hasCredential, hasToken, ...b }: any) => ({
+    ...b,
+    scopes: b.scopes.map(({ name, ...s }: any) => s),
+  })),
 });
 
 test("20 declared serial valid local durable acknowledgements meet p95 without waiting for apply", async () => {
@@ -17,16 +21,12 @@ test("20 declared serial valid local durable acknowledgements meet p95 without w
     // Fixed sample count, no warm-up removal or retry. Owned local storage, one zero-grant consumer.
     for (let i = 0; i < 20; i++) {
       const v = editable(await (await f.request("settings")).json());
-      v.bindings = [
+      v.agents = [
         {
           id: "sample",
-          agent_id: "sample",
           name: `Sample ${i}`,
           receiver_url: f.receiver.url,
           receiver_credential: "sample-secret",
-          enabled: true,
-          scopes: [],
-          wake: {},
         },
       ];
       const start = performance.now();
@@ -54,7 +54,7 @@ test("20 declared serial valid local durable acknowledgements meet p95 without w
       expect(f.app.status().applied).toBe(true);
     }
     const sorted = [...samples].sort((a, b) => a - b);
-    console.info(
+    process.stdout.write(
       JSON.stringify({
         metric: "durable_save_ack",
         count: 20,
@@ -62,7 +62,7 @@ test("20 declared serial valid local durable acknowledgements meet p95 without w
         median_ms: +((sorted[9] + sorted[10]) / 2).toFixed(2),
         p95_ms: +sorted[18].toFixed(2),
         max_ms: +sorted[19].toFixed(2),
-      }),
+      }) + "\n",
     );
     expect(sorted[18]).toBeLessThanOrEqual(500);
   } finally {

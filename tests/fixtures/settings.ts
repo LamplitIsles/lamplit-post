@@ -34,7 +34,7 @@ export async function settingsFixture(
       origin: `http://127.0.0.1:${p}`,
       admin_file: state.dir + "/admin.json",
     },
-    ...(empty ? { accounts: [], bindings: [] } : {}),
+    ...(empty ? { accounts: [], agents: [], bindings: [] } : {}),
   };
   const path = state.dir + "/post.toml";
   await writeFile(path, stringify(config), { mode: 0o600 });
@@ -43,8 +43,19 @@ export async function settingsFixture(
     qqOrigin: platform.url,
     qqGateway: platform.gateway,
   });
-  await app.start();
-  const web = await serveSettings(app, staticRoot, connector, qrLifetime);
+  // Bind before SDK client sockets can consume the selected ephemeral port.
+  let web: Awaited<ReturnType<typeof serveSettings>>;
+  try {
+    web = await serveSettings(app, staticRoot, connector, qrLifetime);
+    await app.start();
+  } catch (error) {
+    await web!?.stop();
+    await app.stop();
+    await receiver.close();
+    await platform.close();
+    await state.close();
+    throw error;
+  }
   let cookie = "",
     csrf = "";
   async function request(

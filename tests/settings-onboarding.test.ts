@@ -6,8 +6,12 @@ import type { startQrConnect } from "@tencent-connect/qqbot-connector";
 
 const editable = (v: any) => ({
   version: v.version,
+  agents: v.agents.map(({ hasCredential, hasToken, ...a }: any) => a),
   accounts: v.accounts.map(({ hasCredential, ready, ...a }: any) => a),
-  bindings: v.bindings.map(({ hasCredential, hasToken, ...b }: any) => b),
+  bindings: v.bindings.map(({ hasCredential, hasToken, ...b }: any) => ({
+    ...b,
+    scopes: b.scopes.map(({ name, ...s }: any) => s),
+  })),
 });
 
 test("draft Matrix exact SDK verifies proposed identity/list before persistence, empty/denied/mismatch/CSRF distinct; pins reused", async () => {
@@ -330,8 +334,7 @@ test("verified failed onboarding reuses orphan account and conversation pins aft
     const binding = {
       id: "retry-binding",
       agent_id: "retry-agent",
-      receiver_url: f.receiver.url,
-      receiver_credential: "retry-receiver",
+      account_ids: [account.id],
       enabled: true,
       scopes: [
         {
@@ -351,6 +354,13 @@ test("verified failed onboarding reuses orphan account and conversation pins aft
         ...initial,
         accounts: [account],
         bindings: [binding],
+        agents: [
+          {
+            id: "retry-agent",
+            receiver_url: f.receiver.url,
+            receiver_credential: "retry-receiver",
+          },
+        ],
         secrets: [
           {
             ref: account.credential,
@@ -359,8 +369,8 @@ test("verified failed onboarding reuses orphan account and conversation pins aft
             value: "first-owned-token",
           },
           {
-            ref: binding.receiver_credential,
-            account: binding.id,
+            ref: "retry-receiver",
+            account: "retry-agent",
             kind: "receiver",
             value: "first-owned-receiver",
           },
@@ -420,6 +430,13 @@ test("verified failed onboarding reuses orphan account and conversation pins aft
         ...reload,
         accounts: [result.account],
         bindings: [binding],
+        agents: [
+          {
+            id: "retry-agent",
+            receiver_url: f.receiver.url,
+            receiver_credential: "retry-receiver",
+          },
+        ],
         secrets: [
           {
             ref: result.account.credential,
@@ -428,8 +445,8 @@ test("verified failed onboarding reuses orphan account and conversation pins aft
             value: "new-owned-token",
           },
           {
-            ref: binding.receiver_credential,
-            account: binding.id,
+            ref: "retry-receiver",
+            account: "retry-agent",
             kind: "receiver",
             value: "new-owned-receiver",
           },

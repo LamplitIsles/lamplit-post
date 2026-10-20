@@ -34,3 +34,11 @@ and only then releases the lease and wipes the in-memory key.
 Optional settings retain this same connection/key/lease during controlled adapter
 replacement. No management config tables or second writer are introduced; TOML
 remains authoritative. See [settings](settings.md) for save/apply failure recovery.
+
+The explicit offline `connections-convert` command is the sole bounded conversion
+of old standalone TOML receiver ownership; it does not change the SQL schema/version.
+Its Store open authenticates key/lease but skips runtime initialization, including
+NULL-send reconciliation and assets-directory creation. See operator instructions.
+Conversation display labels reuse `conversations.name`; they do not participate in
+identity pins or admission. Consumer connections live only in TOML, with one sealed
+receiver credential per agent. Binding account associations do not grant chat access.

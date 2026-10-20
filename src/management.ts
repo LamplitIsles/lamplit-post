@@ -421,9 +421,7 @@ export async function serveSettings(
               200,
               await settings.serialize(async () => {
                 need(
-                  settings.config.bindings.some(
-                    (b) => b.agent_id === input.agent_id,
-                  ),
+                  settings.config.agents.some((a) => a.id === input.agent_id),
                   "invalid_request",
                 );
                 if (input.action === "issue")

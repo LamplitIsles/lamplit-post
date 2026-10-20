@@ -12,8 +12,12 @@ import { Store } from "../src/store";
 import { settingsFixture } from "./fixtures/settings";
 const editable = (v: any) => ({
   version: v.version,
+  agents: v.agents.map(({ hasCredential, hasToken, ...a }: any) => a),
   accounts: v.accounts.map(({ hasCredential, ready, ...a }: any) => a),
-  bindings: v.bindings.map(({ hasCredential, hasToken, ...b }: any) => b),
+  bindings: v.bindings.map(({ hasCredential, hasToken, ...b }: any) => ({
+    ...b,
+    scopes: b.scopes.map(({ name, ...s }: any) => s),
+  })),
 });
 test("real management login, persisted empty registration, stale/CSRF/channel rejection and reload", async () => {
   const f = await settingsFixture(true);
@@ -31,15 +35,11 @@ test("real management login, persisted empty registration, stale/CSRF/channel re
     const initial = await (await f.request("settings")).json();
     expect(initial.bindings).toEqual([]);
     const update = editable(initial);
-    update.bindings.push({
+    update.agents.push({
       id: "manual",
-      agent_id: "manual",
       name: "First agent",
-      enabled: true,
       receiver_url: f.receiver.url,
       receiver_credential: "manual-secret",
-      scopes: [],
-      wake: { direct: false, mention: true, reply: true, aliases: [] },
     });
     const before = await readFile(f.path, "utf8");
     expect(
@@ -128,9 +128,14 @@ test("SDK configuration restart preserves owner, pins, unknown sends, shared ind
       ...structuredClone(update.bindings[0]),
       id: "second",
       agent_id: "second",
-      receiver_credential: "second-secret",
+
       enabled: true,
       scopes: [update.bindings[0].scopes[0]],
+    });
+    update.agents.push({
+      id: "second",
+      receiver_url: f.receiver.url,
+      receiver_credential: "second-secret",
     });
     const response = await (
       await f.apply("settings", {

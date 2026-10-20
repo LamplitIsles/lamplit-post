@@ -58,11 +58,20 @@ test("QQ private peer admission protects history, assets and send while retainin
     const b = structuredClone(s.config.bindings[0]!);
     b.id = "other-binding";
     b.agent_id = "other";
-    b.receiver_credential = "other-receiver";
+    s.config.agents.push({
+      id: "other",
+      receiver_url: s.config.agents[0]!.receiver_url,
+      receiver_credential: "other-receiver",
+    });
     b.scopes = [{ ...b.scopes[1]!, senders: ["someone-else"] }, b.scopes[0]!];
     s.config.bindings.push(b);
     const store = await Store.open(s.config);
-    await store.putSecret("other-receiver", b.id, "receiver", "test-receiver");
+    await store.putSecret(
+      "other-receiver",
+      "other",
+      "receiver",
+      "test-receiver",
+    );
     token = await store.issue("other");
     await store.close();
   });

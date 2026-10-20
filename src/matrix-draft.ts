@@ -75,7 +75,10 @@ export async function verifyMatrix(
         native_id,
         conversation_id: pin?.id ?? opaque("c"),
         type: pin?.type ?? "group",
-        name: typeof name === "string" ? name.slice(0, 256) : native_id,
+        name:
+          typeof name === "string" && name.trim()
+            ? name.trim().slice(0, 256)
+            : native_id,
         encrypted: state.some((e: any) => e.type === "m.room.encryption"),
         source: "platform",
       });

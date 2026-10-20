@@ -108,7 +108,12 @@ export async function serve(service: Service) {
       agent = auth?.startsWith("Bearer ")
         ? service.store.authenticate(auth.slice(7))
         : undefined;
-    if (!agent || service.closed)
+    if (
+      !agent ||
+      service.closed ||
+      (service.config.bindings.some((b) => b.agent_id === agent) &&
+        !service.bindings(agent).length)
+    )
       return new Response(null, {
         status: 401,
         headers: { Connection: "close" },
@@ -197,6 +202,11 @@ export async function serve(service: Service) {
         }
       }
       if (path === "/assets" && req.method === "POST") {
+        if (!service.hasGrants(agent))
+          return new Response(null, {
+            status: 403,
+            headers: { Connection: "close" },
+          });
         try {
           const meta = await service.assets.ingest(
             req.body,

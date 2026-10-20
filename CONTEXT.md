@@ -7,10 +7,16 @@
 **IM 账号（Account）**：Post 管理的一个具体平台身份，例如 QQ Bot App 或 Matrix 用户账号。同一账号可以被授权给一个或多个 agent 绑定。
 _Avoid_: Agent、登录凭证
 
-**IM 会话（Conversation）**：某个 IM 账号可访问的私聊、群聊或房间，是消息的来源与发送目标。它不决定消费者如何划分 agent session。
+**IM 会话（Conversation）**：某个 IM 账号可访问的私聊、群聊或房间，是消息的来源与发送目标。会话名称只用于显示，身份仍由平台标识决定；它不决定消费者如何划分 agent session。
 _Avoid_: Agent session、工作区
 
-**Agent 绑定（Agent binding）**：一个 agent 消费者与可访问的 IM 账号、会话、接纳规则及唤醒规则之间的授权关系。多个 IM 来源可以绑定到消费者的同一个 agent session。
+**消费者连接（Consumer connection）**：一个 agent 消费者独立的消息接收地址与接收密钥。该 agent 的所有 IM 绑定共用这一连接，连接可以没有任何聊天授权。
+_Avoid_: 平台账号、聊天绑定、所有 agent 共用的连接
+
+**接收密钥（Receiver secret）**：消费者用于验证 Post 消息投递的秘密，属于该 agent 的消费者连接。它与 Agent token 和平台凭证相互独立。
+_Avoid_: Agent token、平台凭证、全局共享密钥
+
+**Agent 绑定（Agent binding）**：一个 agent 消费者与可访问的 IM 账号、会话、接纳规则及唤醒规则之间的授权关系。绑定可以关联尚未授予聊天权限的账号，只决定授权与唤醒；多个 IM 来源可以使用同一个消费者连接与 agent session。
 _Avoid_: 每平台一个 agent、平台登录身份
 
 **消息接纳（Admission）**：决定某条消息是否允许向指定 agent 提供正文、附件及上下文的策略判断。Post 观测或归档消息本身不代表接纳；agent 读取历史、访问媒体或发送消息仍须具备相应授权。接纳与是否立即唤醒是不同决定。

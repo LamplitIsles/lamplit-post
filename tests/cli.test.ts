@@ -149,7 +149,7 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
             "--ref",
             "receiver-secret",
             "--account",
-            "cfl-binding",
+            "cfl",
             "--kind",
             "receiver",
           ],

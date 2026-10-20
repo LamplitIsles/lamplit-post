@@ -11,7 +11,9 @@ Noto Sans SC variable UI glyph subset: Google Fonts
 https://github.com/google/fonts/tree/main/ofl/notosanssc
 https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf
 Subset with fonttools pyftsubset using App.svelte text; all glyphs required for
-static interface copy. User content falls back to system fonts for other glyphs.
+static interface copy. Regenerated for #4343 with fonttools4.67.0/brotli1.2.0,
+retaining the previous subset glyphs plus current App.svelte characters.
+Source TTF SHA256: a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da. User content falls back to system fonts for other glyphs.
 See fonts/OFL.txt (SIL OFL 1.1). No runtime font or CDN requests.
 
 Brand/platform attribution: brand/README.md (retained upstream notices).

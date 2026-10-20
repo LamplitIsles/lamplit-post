@@ -31,12 +31,18 @@ export async function stateFixture(
         homeserver,
       },
     ],
+    agents: [
+      {
+        id: "cfl",
+        receiver_url: receiver,
+        receiver_credential: "receiver-secret",
+      },
+    ],
     bindings: [
       {
         id: "cfl-binding",
         agent_id: "cfl",
-        receiver_url: receiver,
-        receiver_credential: "receiver-secret",
+        account_ids: ["qq-main", "matrix-main"],
         scopes: [
           {
             account_id: "qq-main",
@@ -82,12 +88,7 @@ export async function stateFixture(
     "platform",
     "test-matrix-platform-secret",
   );
-  await store.putSecret(
-    "receiver-secret",
-    "cfl-binding",
-    "receiver",
-    "test-receiver",
-  );
+  await store.putSecret("receiver-secret", "cfl", "receiver", "test-receiver");
   const token = await store.issue("cfl");
   await store.close();
   return {

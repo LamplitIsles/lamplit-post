@@ -157,6 +157,17 @@ test("all seven projections and raw assets enforce separate agent scope and priv
         },
       ],
     };
+    f.r.service.config.agents.push({
+      ...f.r.service.config.agents[0]!,
+      id: "other",
+      receiver_credential: "other-receiver",
+    });
+    await f.r.store.putSecret(
+      "other-receiver",
+      "other",
+      "receiver",
+      "test-receiver",
+    );
     f.r.service.config.bindings.push(other);
     const otherToken = await f.r.store.issue("other");
     f.p.sendQQ("C2C_MESSAGE_CREATE", "private", {

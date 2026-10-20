@@ -30,6 +30,7 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
   let encryptedNative: string | undefined;
   let aborts = 0;
   let matrixEvents: any[] = [];
+  let roomName = "Owned fixture room";
   let syncWake: (() => void) | undefined;
   let qqSocket: any;
   let counter = 0;
@@ -213,7 +214,7 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
       });
     if (path.endsWith("/state"))
       return json([
-        { type: "m.room.name", content: { name: "Owned fixture room" } },
+        { type: "m.room.name", content: { name: roomName } },
         ...(encrypted ||
         (encryptedNative &&
           decodeURIComponent(path).includes("/rooms/" + encryptedNative + "/"))
@@ -307,6 +308,9 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     },
     delayWhoami(ms: number) {
       whoamiDelay = ms;
+    },
+    roomName(value: string) {
+      roomName = value;
     },
     matrixCredential(value: string) {
       matrixCredential = value;

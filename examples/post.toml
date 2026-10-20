@@ -20,11 +20,15 @@ native_id = "@post:example.org"
 homeserver = "https://matrix.example.org"
 credential = "matrix-platform"
 
+[[agents]]
+id = "cfl"
+receiver_url = "http://127.0.0.1:3080/api/post/events"
+receiver_credential = "partner-receiver"
+
 [[bindings]]
 id = "partner"
 agent_id = "cfl"
-receiver_url = "http://127.0.0.1:3080/api/post/events"
-receiver_credential = "partner-receiver"
+account_ids = [ "qq-main", "matrix-main" ]
 
 [bindings.wake]
 direct = true

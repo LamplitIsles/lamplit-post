@@ -48,7 +48,7 @@ export class Settings {
         this.validate(this.config);
         for (const a of this.config.accounts)
           await this.store.secret(a.credential, a.id, "platform");
-        for (const b of this.config.bindings)
+        for (const b of this.config.agents)
           await this.store.secret(b.receiver_credential, b.id, "receiver");
         need(!this.closed, "unavailable");
         await this.connect(this.app);
@@ -166,10 +166,22 @@ export class Settings {
         hasCredential: credential(a.credential, a.id, "platform"),
         ready: this.app.service?.platforms.get(a.id)?.ready ?? false,
       })),
-      bindings: this.config.bindings.map((b) => ({
+      agents: this.config.agents.map((b) => ({
         ...b,
         hasCredential: credential(b.receiver_credential, b.id, "receiver"),
-        hasToken: this.store.tokens.has(b.agent_id),
+        hasToken: this.store.tokens.has(b.id),
+      })),
+      bindings: this.config.bindings.map((b) => ({
+        ...b,
+        scopes: b.scopes.map((s) => ({
+          ...s,
+          name:
+            this.store.db
+              .prepare(
+                "SELECT name FROM conversations WHERE account=? AND id=?",
+              )
+              .get(s.account_id, s.conversation_id)?.name ?? null,
+        })),
       })),
     };
   }
@@ -196,7 +208,7 @@ export class Settings {
   }
   validate(next: Config) {
     for (const key of Object.keys(this.config).filter(
-      (k) => !["accounts", "bindings"].includes(k),
+      (k) => !["accounts", "agents", "bindings"].includes(k),
     ) as (keyof Config)[])
       need(
         JSON.stringify(next[key]) === JSON.stringify(this.config[key]),
@@ -227,12 +239,12 @@ export class Settings {
     }
     for (const b of next.bindings) {
       const old = this.config.bindings.find((o) => o.id === b.id);
+      if (old) need(old.agent_id === b.agent_id, "conflict");
+    }
+    for (const a of next.agents) {
+      const old = this.config.agents.find((o) => o.id === a.id);
       if (old)
-        need(
-          old.agent_id === b.agent_id &&
-            old.receiver_credential === b.receiver_credential,
-          "conflict",
-        );
+        need(old.receiver_credential === a.receiver_credential, "conflict");
     }
     for (const b of next.bindings)
       for (const s of b.scopes) {
@@ -265,7 +277,14 @@ export class Settings {
       need(
         input &&
           Object.keys(input).every((key) =>
-            ["version", "accounts", "bindings", "secrets"].includes(key),
+            [
+              "version",
+              "accounts",
+              "agents",
+              "bindings",
+              "secrets",
+              "conversation_names",
+            ].includes(key),
           ),
         "invalid_request",
       );
@@ -275,13 +294,16 @@ export class Settings {
         "conflict",
       );
       need(
-        Array.isArray(input.accounts) && Array.isArray(input.bindings),
+        Array.isArray(input.accounts) &&
+          Array.isArray(input.agents) &&
+          Array.isArray(input.bindings),
         "invalid_request",
       );
       const raw = parse(original);
       const nextRaw = {
         ...raw,
         accounts: input.accounts,
+        agents: input.agents,
         bindings: input.bindings,
       };
       const next = resolveConfigPaths(
@@ -304,7 +326,7 @@ export class Settings {
                 (a) => a.id === s.account && a.credential === s.ref,
               )
             : s.kind === "receiver" &&
-                next.bindings.some(
+                next.agents.some(
                   (b) => b.id === s.account && b.receiver_credential === s.ref,
                 ),
           "invalid_request",
@@ -312,7 +334,7 @@ export class Settings {
       }
       for (const [ref, account, kind] of [
         ...next.accounts.map((a) => [a.credential, a.id, "platform"]),
-        ...next.bindings.map((b) => [b.receiver_credential, b.id, "receiver"]),
+        ...next.agents.map((b) => [b.receiver_credential, b.id, "receiver"]),
       ]) {
         if (
           !secrets.some(
@@ -332,6 +354,22 @@ export class Settings {
             ),
             "invalid_request",
           );
+      const names = input.conversation_names ?? [];
+      need(Array.isArray(names) && names.length <= 1000, "invalid_request");
+      for (const n of names)
+        need(
+          typeof n.name === "string" &&
+            n.name.trim().length > 0 &&
+            n.name.length <= 256 &&
+            next.bindings.some((b) =>
+              b.scopes.some(
+                (s) =>
+                  s.account_id === n.account_id &&
+                  s.conversation_id === n.conversation_id,
+              ),
+            ),
+          "invalid_request",
+        );
       const vault = this.store.db.prepare("SELECT * FROM vault").all();
       const previous = this.config;
       const replacement = stringify(nextRaw);
@@ -376,6 +414,26 @@ export class Settings {
         this.store.transaction(() => {
           for (const s of secrets)
             this.store.putSecret(s.ref, s.account, s.kind, s.value);
+          for (const n of names) {
+            const scope = next.bindings
+              .flatMap((b) => b.scopes)
+              .find(
+                (s) =>
+                  s.account_id === n.account_id &&
+                  s.conversation_id === n.conversation_id,
+              )!;
+            this.store.db
+              .prepare(
+                "INSERT INTO conversations(id,account,native,type,name) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name",
+              )
+              .run(
+                scope.conversation_id,
+                scope.account_id,
+                scope.native_id,
+                scope.type,
+                n.name,
+              );
+          }
         });
         await atomicPrivate(this.path, replacement);
         this.config = next;

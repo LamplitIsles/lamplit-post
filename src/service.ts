@@ -68,15 +68,23 @@ export class Service {
     ]);
   }
   active(agent: string) {
-    return !this.store.owner.closed && this.store.tokens.has(agent);
+    return (
+      !this.store.owner.closed &&
+      this.store.tokens.has(agent) &&
+      this.config.agents.some((a) => a.id === agent)
+    );
   }
   bindings(agent: string) {
     need(this.active(agent));
     const bindings = this.config.bindings.filter(
       (b) => b.agent_id === agent && b.enabled,
     );
-    need(bindings.length);
     return bindings;
+  }
+  hasGrants(agent: string) {
+    return this.bindings(agent).some((b) =>
+      b.scopes.some((s) => this.admitsConversation(s)),
+    );
   }
   scope(agent: string, account: string, conversation: string): Scope {
     const scope = this.bindings(agent)
@@ -138,6 +146,7 @@ export class Service {
     return result;
   }
   async authorizeAsset(agent: string, id: string, signal: AbortSignal) {
+    need(this.hasGrants(agent));
     const row = await this.assets.row(id);
     need(row);
     if (row.owner === agent) return this.assets.metadata(id);
@@ -324,7 +333,8 @@ export class Service {
                 b.id,
                 b.agent_id,
                 id,
-                b.receiver_url,
+                this.config.agents.find((a) => a.id === b.agent_id)!
+                  .receiver_url,
                 JSON.stringify(event),
               ) as unknown as Tables["deliveries"];
           }
@@ -789,7 +799,8 @@ export class Service {
       await update({ state: "cancelled", category: "scope_revoked" });
       return;
     }
-    if (row.receiver !== binding.receiver_url) {
+    const consumer = this.config.agents.find((a) => a.id === binding.agent_id)!;
+    if (row.receiver !== consumer.receiver_url) {
       await update({ state: "held", category: "receiver_changed" });
       return;
     }
@@ -801,8 +812,8 @@ export class Service {
         this.signal(),
       );
       const secret = await this.store.secret(
-        binding.receiver_credential,
-        binding.id,
+        consumer.receiver_credential,
+        consumer.id,
         "receiver",
       );
       const response = await fetch(row.receiver, {

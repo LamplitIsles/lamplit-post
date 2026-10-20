@@ -48,6 +48,9 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
       ...binding,
       id: "second",
       agent_id: "second",
+    });
+    s.config.agents.push({
+      id: "second",
       receiver_url: second.url,
       receiver_credential: "receiver-2",
     });
@@ -65,8 +68,8 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
         .prepare("SELECT `body` FROM deliveries WHERE `binding` = ?")
         .all(binding.id)[0] as any
     ).body;
-    const oldUrl = binding.receiver_url;
-    binding.receiver_url = second.url;
+    const oldUrl = s.config.agents[0]!.receiver_url;
+    s.config.agents[0]!.receiver_url = second.url;
     await service.dispatch(binding);
     expect(
       (
@@ -81,7 +84,7 @@ test("atomic capture dedupe, byte-identical restart delivery, independent bindin
     expect(receiver.attempts).toHaveLength(0);
     await service.stop();
     await store.close();
-    binding.receiver_url = oldUrl;
+    s.config.agents[0]!.receiver_url = oldUrl;
     store = await Store.open(s.config);
     service = new Service(store);
     ready(service);

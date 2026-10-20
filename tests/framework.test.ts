@@ -12,12 +12,18 @@ test("native SQLite vault and key reopen under exclusive owned state", async () 
     accounts: [
       { id: "qq", platform: "qq", credential: "qq-secret", native_id: "app" },
     ],
+    agents: [
+      {
+        id: "agent",
+        receiver_url: "http://127.0.0.1:1",
+        receiver_credential: "receiver",
+      },
+    ],
     bindings: [
       {
         id: "binding",
         agent_id: "agent",
-        receiver_url: "http://127.0.0.1:1",
-        receiver_credential: "receiver",
+        account_ids: ["qq"],
         scopes: [
           {
             account_id: "qq",

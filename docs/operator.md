@@ -40,7 +40,7 @@ node /opt/post/dist/cli.cjs credential-put --config /etc/post/post.toml \
 node /opt/post/dist/cli.cjs credential-put --config /etc/post/post.toml \
   --ref matrix-platform --account matrix-main --kind platform < /private/matrix-token
 node /opt/post/dist/cli.cjs credential-put --config /etc/post/post.toml \
-  --ref partner-receiver --account partner --kind receiver < /private/receiver-secret
+  --ref partner-receiver --account cfl --kind receiver < /private/receiver-secret
 node /opt/post/dist/cli.cjs token-issue --config /etc/post/post.toml --agent cfl > /private/agent-token
 ```
 
@@ -97,3 +97,31 @@ files lack this exact header/version contract and are refused. No migration,
 compatibility parser or reset operation is included. Any future actual transition
 from the current managed installation must decide fresh state separately and
 preserve the installed files until the operator authorizes that transition.
+
+## Explicit consumer connection conversion
+
+This release accepts only the new `agents` + `bindings.account_ids` TOML format.
+For an existing standalone binding-owned receiver document, stop Post and explicitly
+run the bounded offline command against that installation, using its existing key:
+
+```sh
+node /opt/post/dist/cli.cjs connections-convert --config /etc/post/post.toml
+node /opt/post/dist/cli.cjs config-check --config /etc/post/post.toml
+```
+
+This is a separate operator transition; building or merging does not execute it.
+The command takes the real ownership lease, authenticates the existing vault and
+never starts adapters or reconciles unresolved sends. For each agent, all old URLs
+and decrypted receiver secrets must agree; otherwise it rejects before mutation
+without revealing either value or choosing a winner. Platform credentials, tokens,
+key, administrator, pins, history and delivery snapshots remain unchanged. Associations
+are derived only from existing scopes; empty historical registration placeholders
+stay empty, and globally configured accounts are never invented as associations.
+
+Fresh agent-owned receiver refs are staged additively; old authority remains usable
+until a privately synced atomic TOML rename commits. Obsolete binding-owned receiver
+refs are then removed. If interrupted before commit, rerun this explicit command;
+after commit the same command validates new credentials and finishes bounded cleanup.
+Repeating it reports `already_converted`; normal startup does not convert or replay.
+A failed/uncertain command does not authorize retrying any native send. No additional
+backup prerequisite is imposed by this conversion.

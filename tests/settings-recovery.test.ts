@@ -23,6 +23,7 @@ async function fixture() {
     accounts: state.config.accounts.filter((a) => a.platform === "matrix"),
     bindings: state.config.bindings.map((b) => ({
       ...b,
+      account_ids: ["matrix-main"],
       scopes: b.scopes.filter((s) => s.account_id === "matrix-main"),
     })),
     settings: {
@@ -117,6 +118,7 @@ test("extracted CLI retains authenticated management after rejected persisted cr
         body: JSON.stringify({
           version: view.version,
           accounts: f.config.accounts,
+          agents: f.config.agents,
           bindings: f.config.bindings,
           secrets: [
             {
@@ -182,6 +184,7 @@ test("settings native failure retains the same Store for retry; missing vault cr
     const saved = await app.save({
       version: app.version,
       accounts: f.config.accounts,
+      agents: f.config.agents,
       bindings: f.config.bindings,
       secrets: [
         {

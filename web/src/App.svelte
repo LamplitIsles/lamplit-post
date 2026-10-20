@@ -1,5 +1,5 @@
 <script>
-  import { onMount, tick } from "svelte";
+  import { onMount } from "svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import { Checkbox } from "$lib/components/ui/checkbox/index.js";
@@ -11,7 +11,13 @@
     busy = $state(false),
     password = $state(""),
     csrf = "";
-  let state = $state({ accounts: [], bindings: [], version: "", state: "" }),
+  let state = $state({
+      accounts: [],
+      agents: [],
+      bindings: [],
+      version: "",
+      state: "",
+    }),
     agent = $state(""),
     notice = $state(""),
     error = $state("");
@@ -27,8 +33,6 @@
     manualQQ = $state(false);
   let qqController,
     qqGeneration = 0;
-  let receiverRequired = $state(false),
-    connectionDetails = $state(false);
   const draftKey = () =>
     JSON.stringify([
       selected?.id,
@@ -41,7 +45,8 @@
     const key = draftKey();
     if (verificationKey && verificationKey !== key) {
       invalidateVerification();
-      if (draft) draft.scopes = [];
+      if (draft && selected)
+        draft.scopes = draft.scopes.filter((s) => s.account_id !== selected.id);
     }
     if (selected?.platform !== "qq" && qqDraft) void clearQQ();
     if (!logged) {
@@ -72,9 +77,6 @@
       )
         reasons.push("完成 QQ 扫码授权，或填写 AppSecret");
     }
-    if (!draft.receiver_url) reasons.push("填写消费者接收地址");
-    if (receiverRequired && !receiverSecret)
-      reasons.push("填写此绑定的接收密钥");
     return reasons;
   });
   let pollController;
@@ -84,16 +86,16 @@
     step = $state(0),
     newAccount = $state(false),
     platformSecret = $state(""),
-    receiverSecret = $state(""),
     aliases = $state("");
   let candidates = $state([]),
     search = $state(""),
     discovery = $state(""),
+    directoryState = $state("idle"),
     manual = $state(""),
     direct = $state(false),
     peers = $state("");
   let register = $state(false),
-    registration = $state({ agent_id: "", name: "", receiver_url: "" }),
+    registration = $state({ id: "", name: "", receiver_url: "" }),
     registrationSecret = $state("");
   let removal = $state(null),
     qr = $state(null),
@@ -101,10 +103,11 @@
     shareAccount = $state(null),
     oneTime = $state("");
   const agents = $derived([
-    ...new Map(
-      state.bindings.map((b) => [b.agent_id, b.name || b.agent_id]),
-    ).entries(),
+    ...new Map(state.agents.map((a) => [a.id, a.name || a.id])).entries(),
   ]);
+  const consumer = $derived(state.agents.find((a) => a.id === agent));
+  let connection = $state(null),
+    connectionSecret = $state("");
   const bindings = $derived(state.bindings.filter((b) => b.agent_id === agent));
   const copy = (o) => JSON.parse(JSON.stringify(o));
   const cleanAccount = (a) => {
@@ -114,6 +117,8 @@
   };
   const cleanBinding = (b) => {
     const { hasCredential, hasToken, ...rest } = b;
+    if (rest.scopes)
+      rest.scopes = rest.scopes.map(({ name, ...scope }) => scope);
     return rest;
   };
   const wake = () => ({
@@ -199,8 +204,7 @@
     state = await api("settings");
     applying = state.busy;
     if (applying && !pollController) void followApply();
-    if (!agents.some(([id]) => id === agent))
-      agent = state.bindings[0]?.agent_id || "";
+    if (!agents.some(([id]) => id === agent)) agent = state.agents[0]?.id || "";
   }
   async function login() {
     await run(async () => {
@@ -301,13 +305,29 @@
         "连接未成功，新设置未生效。已保留账号和聊天草稿，请检查连接后重试。";
     }
   }
-  async function save(accounts, bindings, secrets = [], authorization) {
+  async function save(
+    accounts,
+    bindings,
+    secrets = [],
+    authorization,
+    consumers = state.agents,
+  ) {
     let result;
     try {
       result = await api("settings", {
         version: state.version,
         accounts: accounts.map(cleanAccount),
+        agents: consumers.map(cleanBinding),
         bindings: bindings.map(cleanBinding),
+        conversation_names: bindings.flatMap((b) =>
+          b.scopes
+            .filter((s) => s.name)
+            .map((s) => ({
+              account_id: s.account_id,
+              conversation_id: s.conversation_id,
+              name: s.name,
+            })),
+        ),
         secrets,
         ...(authorization ? { qq_authorization: authorization } : {}),
       });
@@ -334,33 +354,29 @@
     invalidateVerification();
     void clearQQ();
     manualQQ = false;
-    receiverRequired = !binding?.hasCredential;
     draft = binding
-      ? copy(cleanBinding(binding))
+      ? copy(binding)
       : {
           id: uid("binding"),
           agent_id: agent,
-          name: bindings[0]?.name,
+          account_ids: [],
           enabled: true,
-          receiver_url: bindings[0]?.receiver_url || "",
-          receiver_credential: uid("receiver"),
           scopes: [],
           wake: wake(),
         };
-    selected = binding?.scopes.length
+    selected = binding?.account_ids.length
       ? copy(
           cleanAccount(
-            state.accounts.find((a) => a.id === binding.scopes[0].account_id),
+            state.accounts.find((a) => a.id === binding.account_ids[0]),
           ),
         )
       : null;
-    connectionDetails = !draft.receiver_url || receiverRequired;
     step = 0;
     newAccount = false;
     platformSecret = "";
-    receiverSecret = "";
     aliases = draft.wake.aliases.join(", ");
     candidates = [];
+    directoryState = "idle";
     discovery = "";
     search = "";
     open = true;
@@ -369,19 +385,18 @@
     invalidateVerification();
     void clearQQ();
     if (selected?.id !== a.id) {
-      draft.scopes = [];
       platformSecret = "";
     }
     selected = copy(cleanAccount(a));
     newAccount = false;
     candidates = [];
+    directoryState = "idle";
     discovery = "";
   }
   function addAccount() {
     invalidateVerification();
     void clearQQ();
     manualQQ = false;
-    draft.scopes = [];
     selected = {
       id: uid("account"),
       name: "",
@@ -400,6 +415,7 @@
     verified = false;
     verificationKey = "";
     candidates = [];
+    directoryState = "idle";
     discovery = "";
   }
   function normalizeDraftId(id, items = []) {
@@ -414,7 +430,15 @@
       return {
         ...scope,
         account_id: id,
-        ...(pin ? { conversation_id: pin.conversation_id } : {}),
+        ...(pin
+          ? {
+              conversation_id: pin.conversation_id,
+              name:
+                typeof pin.name === "string" && pin.name.trim()
+                  ? pin.name.trim().slice(0, 256)
+                  : scope.native_id,
+            }
+          : {}),
       };
     });
   }
@@ -524,18 +548,27 @@
   async function discover() {
     if (selected.platform === "matrix") return verifyDraft();
     await run(async () => {
-      const result = await api("discover", {
-        account_id: selected.id,
-        ...(qqDraft?.state === "authorized"
-          ? { qq_authorization: qqDraft.id }
-          : {}),
-      });
+      directoryState = "loading";
+      let result;
+      try {
+        result = await api("discover", {
+          account_id: selected.id,
+          ...(qqDraft?.state === "authorized"
+            ? { qq_authorization: qqDraft.id }
+            : {}),
+        });
+      } catch (e) {
+        directoryState = "failed";
+        throw e;
+      }
       candidates = result.items;
+      directoryState = candidates.length ? "ready" : "empty";
       discovery = "QQ 仅显示本机已观测或手动配置的聊天，不是完整目录。";
     });
   }
   function toggle(c, checked) {
     const scope = {
+      ...(c.name?.trim() ? { name: c.name.trim().slice(0, 256) } : {}),
       account_id: selected.id,
       conversation_id: c.conversation_id || uid("chat"),
       native_id: c.native_id,
@@ -544,7 +577,14 @@
     };
     draft.scopes = checked
       ? [...draft.scopes, scope]
-      : draft.scopes.filter((s) => s.conversation_id !== c.conversation_id);
+      : draft.scopes.filter(
+          (s) =>
+            !(
+              s.account_id === selected.id &&
+              s.native_id === c.native_id &&
+              s.type === c.type
+            ),
+        );
   }
   function manualAdd() {
     if (!manual.trim()) return;
@@ -595,6 +635,7 @@
       const accounts = state.accounts.some((a) => a.id === selected.id)
         ? state.accounts.map((a) => (a.id === selected.id ? selected : a))
         : [...state.accounts, selected];
+      draft.account_ids = [...new Set([...draft.account_ids, selected.id])];
       const updated = state.bindings.some((b) => b.id === draft.id)
         ? state.bindings.map((b) => (b.id === draft.id ? draft : b))
         : [...state.bindings, draft];
@@ -605,13 +646,6 @@
           account: selected.id,
           kind: "platform",
           value: platformSecret,
-        });
-      if (receiverSecret)
-        secrets.push({
-          ref: draft.receiver_credential,
-          account: draft.id,
-          kind: "receiver",
-          value: receiverSecret,
         });
       const result = await save(
         accounts,
@@ -631,39 +665,30 @@
     void clearQQ();
     open = false;
     platformSecret = "";
-    receiverSecret = "";
     draft = null;
   }
   async function registerAgent() {
     await run(async () => {
-      const id = uid("binding");
-      const b = {
-        id,
-        ...registration,
-        enabled: true,
-        receiver_credential: uid("receiver"),
-        scopes: [],
-        wake: wake(),
-      };
+      const c = { ...registration, receiver_credential: uid("receiver") };
       await save(
         state.accounts,
-        [...state.bindings, b],
-        registrationSecret
-          ? [
-              {
-                ref: b.receiver_credential,
-                account: id,
-                kind: "receiver",
-                value: registrationSecret,
-              },
-            ]
-          : [],
+        state.bindings,
+        [
+          {
+            ref: c.receiver_credential,
+            account: c.id,
+            kind: "receiver",
+            value: registrationSecret,
+          },
+        ],
+        undefined,
+        [...state.agents, c],
       );
-      agent = b.agent_id;
+      agent = c.id;
       oneTime = "";
       register = false;
       registrationSecret = "";
-      registration = { agent_id: "", name: "", receiver_url: "" };
+      registration = { id: "", name: "", receiver_url: "" };
     });
   }
   async function token(action) {
@@ -730,11 +755,7 @@
               oneTime = "";
             }}
             ><span class="avatar">{name[0]}</span><span
-              ><strong>{name}</strong><small
-                >{state.bindings
-                  .filter((b) => b.agent_id === id)
-                  .reduce((n, b) => n + b.scopes.length, 0)} 个授权聊天</small
-              ></span
+              ><strong>{name}</strong></span
             ></button
           >{/each}
       </nav>
@@ -805,7 +826,7 @@
             >＋ 绑定账号</Button
           >
         </div>
-        {#if bindings.some((b) => !b.hasToken)}<p class="callout">
+        {#if !consumer?.hasToken}<p class="callout">
             尚未签发 Agent token。请在下方消费者连接设置中完成连接。
           </p>{/if}
         <section class="bindings" aria-label="已绑定账号">
@@ -819,12 +840,12 @@
                   : "服务未就绪"}</small
             >
           </div>
-          {#each bindings.filter((b) => b.scopes.length) as b (b.id)}<article
+          {#each bindings.filter((b) => b.account_ids.length) as b (b.id)}<article
               class="binding"
             >
               <div class="binding-heading">
                 <div class="identity identity-list">
-                  {#each [...new Set(b.scopes.map((s) => s.account_id))] as accountId}{@const a =
+                  {#each b.account_ids as accountId}{@const a =
                       state.accounts.find((a) => a.id === accountId)}
                     <div class="account-identity">
                       <img
@@ -835,81 +856,93 @@
                       />
                       <div>
                         <h3>{a.name || a.id}</h3>
-                        <small
-                          >{a.native_id} · {a.ready
-                            ? "已连接"
-                            : "连接不可用"}</small
-                        >
+                        <small>{a.ready ? "已连接" : "连接不可用"}</small>
                       </div>
+                      <Badge variant="secondary"
+                        >{b.enabled
+                          ? consumer?.hasToken
+                            ? b.scopes.some((s) => s.account_id === accountId)
+                              ? "已授权聊天"
+                              : "未授权聊天"
+                            : "待连接消费者"
+                          : "已暂停"}</Badge
+                      >
                     </div>{/each}
                 </div>
-                <Badge variant="secondary"
-                  >{b.enabled
-                    ? b.hasToken
-                      ? "已启用"
-                      : "待连接消费者"
-                    : "已暂停"}</Badge
-                >
               </div>
-              <dl>
-                <dt>聊天范围</dt>
-                <dd>
-                  {b.scopes
-                    .map(
-                      (s) =>
-                        s.native_id +
-                        "（" +
-                        (s.type === "direct" ? "私聊" : "群聊 / 房间") +
-                        "）",
-                    )
-                    .join("、")}
-                </dd>
-                <dt>会唤醒</dt>
-                <dd>{wakeText(b.wake)}</dd>
-                <dt>账号共享</dt>
-                <dd>
-                  {state.bindings.some(
-                    (x) =>
-                      x.agent_id !== agent &&
-                      x.scopes.some((s) =>
-                        b.scopes.some((t) => s.account_id === t.account_id),
-                      ),
-                  )
-                    ? "其他 agent 也在使用，授权各自独立"
-                    : "目前仅此 agent 使用"}
-                </dd>
-              </dl>
-              <div class="actions">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy || applying}
-                  onclick={() => begin(b)}>编辑绑定</Button
-                ><Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy || applying}
-                  onclick={() =>
-                    run(() =>
-                      save(
-                        state.accounts,
-                        state.bindings.map((x) =>
-                          x.id === b.id ? { ...x, enabled: !x.enabled } : x,
+              <details class="binding-details">
+                <summary>详情与编辑</summary>
+                <dl>
+                  <dt>聊天范围</dt>
+                  <dd>
+                    {b.scopes
+                      .map(
+                        (s) =>
+                          (s.name || s.native_id) +
+                          "（" +
+                          (s.type === "direct" ? "私聊" : "群聊 / 房间") +
+                          "）",
+                      )
+                      .join("、")}
+                  </dd>
+                  <dt>会唤醒</dt>
+                  <dd>{wakeText(b.wake)}</dd>
+                  <dt>账号共享</dt>
+                  <dd>
+                    {state.bindings.some(
+                      (x) =>
+                        x.agent_id !== agent &&
+                        x.scopes.some((s) =>
+                          b.scopes.some((t) => s.account_id === t.account_id),
                         ),
-                      ),
-                    )}>{b.enabled ? "暂停绑定" : "恢复绑定"}</Button
-                ><Button
-                  variant="ghost"
-                  size="sm"
-                  onclick={() => {
-                    removal = b;
-                  }}>解绑</Button
-                >{#each state.accounts.filter((a) => a.platform === "qq" && b.scopes.some((s) => s.account_id === a.id)) as a}<Button
+                    )
+                      ? "其他 agent 也在使用，授权各自独立"
+                      : "目前仅此 agent 使用"}
+                  </dd>
+                  <dt>平台标识</dt>
+                  <dd>
+                    {b.account_ids
+                      .map(
+                        (id) =>
+                          state.accounts.find((a) => a.id === id)?.native_id,
+                      )
+                      .join("、")}
+                  </dd>
+                  <dt>聊天标识</dt>
+                  <dd>{b.scopes.map((s) => s.native_id).join("、") || "无"}</dd>
+                </dl>
+                <div class="actions">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy || applying}
+                    onclick={() => begin(b)}>编辑绑定</Button
+                  ><Button
                     variant="ghost"
                     size="sm"
-                    onclick={() => showQR(a)}>添加机器人</Button
-                  >{/each}
-              </div>
+                    disabled={busy || applying}
+                    onclick={() =>
+                      run(() =>
+                        save(
+                          state.accounts,
+                          state.bindings.map((x) =>
+                            x.id === b.id ? { ...x, enabled: !x.enabled } : x,
+                          ),
+                        ),
+                      )}>{b.enabled ? "暂停绑定" : "恢复绑定"}</Button
+                  ><Button
+                    variant="ghost"
+                    size="sm"
+                    onclick={() => {
+                      removal = b;
+                    }}>解绑</Button
+                  >{#each state.accounts.filter((a) => a.platform === "qq" && b.account_ids.includes(a.id)) as a}<Button
+                      variant="ghost"
+                      size="sm"
+                      onclick={() => showQR(a)}>添加机器人</Button
+                    >{/each}
+                </div>
+              </details>
             </article>
           {:else}<div class="empty">
               <h2>还没有授权聊天</h2>
@@ -926,12 +959,20 @@
           <summary>消费者连接设置</summary>
           <p>Agent ID：{agent}</p>
           <p>Post 地址：{state.machine_url || "机器 API 尚未就绪"}</p>
-          <p>消费者接收地址：{bindings[0]?.receiver_url}</p>
+          <p>消费者接收地址：{consumer?.receiver_url}</p>
           <small
             >Agent token 访问 Post；接收密钥验证 Post
             的投递。它们与平台凭据相互独立。</small
           >
           <div class="actions">
+            <Button
+              variant="outline"
+              disabled={busy || applying}
+              onclick={() => {
+                connection = copy(cleanBinding(consumer));
+                connectionSecret = "";
+              }}>编辑消费者连接</Button
+            >
             <Button
               variant="outline"
               disabled={busy || applying}
@@ -966,7 +1007,6 @@
       invalidateVerification();
       void clearQQ();
       platformSecret = "";
-      receiverSecret = "";
     }
   }}
   ><Dialog.Content class="binding-dialog" showCloseButton={false}
@@ -1021,7 +1061,6 @@
                     selected.native_id = "";
                     delete selected.homeserver;
                     platformSecret = "";
-                    draft.scopes = [];
                     invalidateVerification();
                     void clearQQ();
                   }}
@@ -1045,7 +1084,7 @@
                     />{/if}
                   <p role="status">
                     {qqDraft?.state === "authorized"
-                      ? `已授权机器人 ${qqDraft.native_id}`
+                      ? `已授权机器人 ${qqDraft.native_id}，尚未保存连接`
                       : qqDraft?.state === "expired"
                         ? "授权已过期，请重新扫码。"
                         : qqDraft?.state === "failed"
@@ -1129,24 +1168,6 @@
                 </p>
               </div>{/if}
           {/if}
-          <details bind:open={connectionDetails}>
-            <summary>此绑定的消费者连接</summary>
-            <div class="field">
-              <label for="receiver">接收地址</label><Input
-                id="receiver"
-                type="url"
-                bind:value={draft.receiver_url}
-              />
-            </div>
-            <div class="field">
-              <label for="receiver-secret">接收密钥（留空保留）</label><Input
-                id="receiver-secret"
-                type="password"
-                autocomplete="new-password"
-                bind:value={receiverSecret}
-              />
-            </div>
-          </details>
         {:else if step === 1}<p class="hint">
             决定该 agent 可以读取和发送消息的位置；聊天范围不是执行会话。
           </p>
@@ -1163,10 +1184,26 @@
           </div>
           <small
             >{newAccount && selected.platform === "qq"
-              ? "QQ 暂无完整聊天目录，可以填写此 App 的原生 ID。"
+              ? "请先保存账号连接，再从群内 @ 机器人以发现聊天。当前授权草稿尚不能接收消息。"
               : discovery ||
                 "候选来自平台返回、本机已观测或手动配置，不会自动授权。"}</small
           >
+          {#if selected.platform === "qq"}<p class="hint">
+              这里搜索本机已观测 / 已配置的聊天，不是 QQ
+              群完整目录。先保存并连接机器人，将它添加到群后在群里 @
+              它，再读取聊天并明确选择授权。群标识是此 App 的
+              openid，不是公开群号。
+            </p>
+            {#if directoryState === "empty"}<p role="status">
+                本机尚无候选聊天。保存连接后，按上述步骤发现聊天；收到消息不会自动授权或唤醒。
+              </p>
+            {:else if directoryState === "failed"}<p role="status">
+                读取候选失败，尚不能确认本机列表。请检查账号连接后重试。
+              </p>
+            {:else if directoryState === "idle"}<p role="status">
+                点击读取可用聊天，查看本机已有候选。
+              </p>{/if}
+          {/if}
           <div class="field">
             <label for="search">搜索聊天</label><Input
               id="search"
@@ -1180,12 +1217,15 @@
                 id={"candidate-" + c.conversation_id}
                 disabled={c.encrypted}
                 checked={draft.scopes.some(
-                  (s) => s.conversation_id === c.conversation_id,
+                  (s) =>
+                    s.account_id === selected.id &&
+                    s.native_id === c.native_id &&
+                    s.type === c.type,
                 )}
                 onCheckedChange={(checked) => toggle(c, checked)}
               /><label class="chat-label" for={"candidate-" + c.conversation_id}
                 ><span
-                  >{c.name}<small
+                  >{c.name || c.native_id}<small
                     >{c.native_id} · {c.source === "platform"
                       ? "平台返回"
                       : c.source === "observed"
@@ -1198,10 +1238,14 @@
               >
             </div>{/each}
           <h3>已选聊天</h3>
-          {#each draft.scopes as s}<div class="chat-row">
+          {#each draft.scopes.filter((s) => s.account_id === selected.id) as s}<div
+              class="chat-row"
+            >
               <span class="chat-label"
-                >{s.native_id}<small
-                  >{s.type === "direct" ? "私聊" : "群聊 / 房间"}</small
+                >{s.name || s.native_id}<small
+                  >{s.native_id} · {s.type === "direct"
+                    ? "私聊"
+                    : "群聊 / 房间"}</small
                 ></span
               ><Button
                 variant="ghost"
@@ -1267,7 +1311,9 @@
           <dl>
             <dt>授权聊天</dt>
             <dd>
-              {draft.scopes.map((s) => s.native_id).join("、") || "无授权聊天"}
+              {draft.scopes.map((s) => s.name || s.native_id).join("、") ||
+                "无授权聊天"}
+              <small>{draft.scopes.map((s) => s.native_id).join("、")}</small>
             </dd>
             <dt>唤醒</dt>
             <dd>
@@ -1286,22 +1332,6 @@
       </div>
       {#if missing.length}<p id="next-reason" class="hint" role="status">
           还需：{missing.join("；")}。
-          {#if !draft.receiver_url || (receiverRequired && !receiverSecret)}<button
-              class="text-link"
-              onclick={async () => {
-                const details = document
-                  .querySelector("#receiver")
-                  ?.closest("details");
-                if (details) details.open = true;
-                connectionDetails = true;
-                await tick();
-                document
-                  .querySelector(
-                    !draft.receiver_url ? "#receiver" : "#receiver-secret",
-                  )
-                  ?.focus();
-              }}>填写消费者连接</button
-            >{/if}
         </p>{/if}
       <Dialog.Footer class="editor-footer"
         ><Button variant="ghost" disabled={busy || applying} onclick={dismiss}
@@ -1337,7 +1367,7 @@
   onOpenChange={(v) => {
     if (!v) registrationSecret = "";
   }}
-  ><Dialog.Content
+  ><Dialog.Content class="connection-dialog"
     ><Dialog.Header
       ><Dialog.Title>注册 agent 消费者</Dialog.Title><Dialog.Description
         >填写现有消费者的信息。注册后默认没有聊天访问权。</Dialog.Description
@@ -1352,8 +1382,8 @@
       <div class="field">
         <label for="agent-id">Agent ID</label><Input
           id="agent-id"
-          pattern="[a-zA-Z0-9_-]{(1, 64)}"
-          bind:value={registration.agent_id}
+          pattern={"[a-zA-Z0-9_-]{1,64}"}
+          bind:value={registration.id}
           required
         />
       </div>
@@ -1419,9 +1449,7 @@
           run(async () => {
             await save(
               state.accounts,
-              state.bindings
-                .filter((b) => b.id !== removal.id || bindings.length === 1)
-                .map((b) => (b.id === removal.id ? { ...b, scopes: [] } : b)),
+              state.bindings.filter((b) => b.id !== removal.id),
             );
             removal = null;
           })}>确认解绑</Button
@@ -1493,3 +1521,75 @@
       </div>{/if}</Dialog.Content
   ></Dialog.Root
 >
+
+<Dialog.Root
+  open={!!connection}
+  onOpenChange={(v) => {
+    if (!v) {
+      connection = null;
+      connectionSecret = "";
+    }
+  }}
+>
+  <Dialog.Content class="connection-dialog">
+    <Dialog.Header
+      ><Dialog.Title>编辑消费者连接</Dialog.Title><Dialog.Description
+        >该 agent 的所有聊天共用此连接。接收密钥留空保留现有值。</Dialog.Description
+      ></Dialog.Header
+    >
+    {#if connection}<form
+        onsubmit={(e) => {
+          e.preventDefault();
+          run(async () => {
+            await save(
+              state.accounts,
+              state.bindings,
+              connectionSecret
+                ? [
+                    {
+                      ref: connection.receiver_credential,
+                      account: connection.id,
+                      kind: "receiver",
+                      value: connectionSecret,
+                    },
+                  ]
+                : [],
+              undefined,
+              state.agents.map((a) =>
+                a.id === connection.id ? connection : a,
+              ),
+            );
+            connection = null;
+            connectionSecret = "";
+          });
+        }}
+      >
+        <div class="field">
+          <label for="connection-url">消费者接收地址</label><Input
+            id="connection-url"
+            type="url"
+            required
+            bind:value={connection.receiver_url}
+          />
+        </div>
+        <div class="field">
+          <label for="connection-secret">接收密钥（留空保留）</label><Input
+            id="connection-secret"
+            type="password"
+            autocomplete="new-password"
+            bind:value={connectionSecret}
+          />
+        </div>
+        {#if error}<p role="alert">{error}</p>{/if}
+        <div class="actions">
+          <Button
+            variant="ghost"
+            onclick={() => {
+              connection = null;
+              connectionSecret = "";
+            }}>取消</Button
+          ><Button type="submit" disabled={busy || applying}>保存连接</Button>
+        </div>
+      </form>{/if}
+  </Dialog.Content>
+</Dialog.Root>
