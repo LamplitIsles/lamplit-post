@@ -469,7 +469,9 @@
           ? {
               conversation_id: pin.conversation_id,
               name:
-                typeof pin.name === "string" && pin.name.trim()
+                typeof scope.name === "string" && scope.name.trim()
+                  ? scope.name.trim().slice(0, 256)
+                  : typeof pin.name === "string" && pin.name.trim()
                   ? pin.name.trim().slice(0, 256)
                   : selected.platform === "qq" ? undefined : scope.native_id,
             }
@@ -603,8 +605,10 @@
     });
   }
   function toggle(c, checked) {
+    const existing = state.bindings.flatMap((b) => b.scopes).find((s) =>
+      s.account_id === selected.id && s.conversation_id === c.conversation_id);
     const scope = {
-      ...(c.name?.trim() ? { name: c.name.trim().slice(0, 256) } : {}),
+      ...((existing?.name || c.name)?.trim() ? { name: (existing?.name || c.name).trim().slice(0, 256) } : {}),
       account_id: selected.id,
       conversation_id: c.conversation_id || uid("chat"),
       native_id: c.native_id,
@@ -663,6 +667,10 @@
       step++;
       return;
     }
+    if (draft.scopes.some((s) => s.name !== undefined && !s.name.trim())) {
+      error = "聊天名称不能为空，请填写一个便于识别的名称。";
+      return;
+    }
     await run(async () => {
       draft.wake.aliases = aliases
         .split(/[,，\n]/)
@@ -672,9 +680,15 @@
         ? state.accounts.map((a) => (a.id === selected.id ? selected : a))
         : [...state.accounts, selected];
       draft.account_ids = [...new Set([...draft.account_ids, selected.id])];
-      const updated = state.bindings.some((b) => b.id === draft.id)
+      const updated = (state.bindings.some((b) => b.id === draft.id)
         ? state.bindings.map((b) => (b.id === draft.id ? draft : b))
-        : [...state.bindings, draft];
+        : [...state.bindings, draft]).map((b) => ({
+          ...b,
+          scopes: b.scopes.map((s) => {
+            const edited = draft.scopes.find((x) => x.account_id === s.account_id && x.conversation_id === s.conversation_id);
+            return edited?.name ? { ...s, name: edited.name.trim() } : s;
+          }),
+        }));
       const secrets = [];
       if (platformSecret)
         secrets.push({
@@ -1266,6 +1280,12 @@
                 >{chatName(s)}<small
                   >{s.native_id} · {chatType(s)}</small
                 ></span
+              ><div class="field">
+                <label for={"chat-name-" + s.conversation_id}>聊天名称</label>
+                <Input id={"chat-name-" + s.conversation_id} maxlength="256"
+                  value={s.name ?? ""} placeholder={chatName(s)}
+                  oninput={(e) => { s.name = e.currentTarget.value; }} />
+              </div
               ><Button
                 variant="ghost"
                 size="sm"

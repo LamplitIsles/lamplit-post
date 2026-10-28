@@ -252,7 +252,7 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     p.stall();
     const args = {
       account_id: "matrix-main",
-      conversation_id: "matrix-room",
+      conversation_name: "Matrix 群聊 3",
       request_id: "actual-crash",
       content: [{ type: "text", text: "do not resend" }],
     };
@@ -337,7 +337,10 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
         captured: await client
           ?.callTool({
             name: "read_messages",
-            arguments: { account_id: "qq-main", conversation_id: "qq-group" },
+            arguments: {
+              account_id: "qq-main",
+              conversation_name: "QQ 群聊 1",
+            },
           })
           .then((r) => r.structuredContent)
           .catch(() => null),

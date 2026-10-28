@@ -150,14 +150,23 @@ export async function serve(service: Service) {
           maxRequestBodySize: 131072,
         });
         mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-          tools: Object.entries(ToolInputs).map(([name, schema]) => ({
-            name,
-            description:
-              name === "send_message"
-                ? "Send to an exact current group/contact conversation_name within your grants. Disambiguate with account_id/platform/conversation_type only if needed. Use account_id + conversation_id when a name is unavailable or cannot uniquely identify the chat. In groups use mention name for an exact member name, or native_user_id when unavailable/ambiguous. QQ names cover observed speakers in this chat only, not a current roster; Matrix uses joined members. Plain @name text is not a native mention. Repeat the identical request_id and input to reconcile; never guess or blind-retry."
-                : `Post v1 ${name}`,
-            inputSchema: z.toJSONSchema(schema) as any,
-          })),
+          tools: Object.entries(ToolInputs).map(([name, schema]) => {
+            const inputSchema = z.toJSONSchema(schema) as any;
+            return {
+              name,
+              description:
+                name === "send_message"
+                  ? "Send to an exact current conversation_name within your grants. If needed, disambiguate with account_id, platform or conversation_type. In groups use mention name for an exact member name, or native_user_id when unavailable/ambiguous. QQ names cover observed speakers in this chat only, not a current roster; Matrix uses joined members. Plain @name text is not a native mention. Repeat the same request_id and input to reconcile; never guess or blind-retry."
+                  : [
+                        "get_conversation",
+                        "list_members",
+                        "read_messages",
+                      ].includes(name)
+                    ? `Post v1 ${name}: select the exact current conversation_name; optionally disambiguate with account_id, platform or conversation_type.`
+                    : `Post v1 ${name}`,
+              inputSchema,
+            };
+          }),
         }));
         mcp.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           try {

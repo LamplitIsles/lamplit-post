@@ -185,6 +185,7 @@ export class QQPlatform implements Platform {
   stopped = false;
   chain: Promise<unknown> = Promise.resolve();
   pending = 0;
+  private initialGroupLookup?: AbortController;
   startedAt = Date.now();
   constructor(
     public config: AccountConfig,
@@ -275,6 +276,8 @@ export class QQPlatform implements Platform {
       void this.stop();
       return;
     }
+    // Name enrichment is optional: do not hold queued inbound messages for it.
+    if (this.pending > 1) this.initialGroupLookup?.abort();
     qqInbound({ stage: "sdk_capture", type, native_event, category: "queued" });
     this.chain = this.chain
       .then(() => this.capture(session))
@@ -362,12 +365,42 @@ export class QQPlatform implements Platform {
       }
     }
     const replyId = native.message_reference?.message_id;
+    // Only a new group can use upstream metadata as its initial name. The
+    // lookup stays outside the observation transaction and shares shutdown.
+    let conversationName: string | undefined;
+    if (
+      !session.isDirect &&
+      this.pending === 1 &&
+      !this.service.store.db
+        .prepare(
+          "SELECT id FROM conversations WHERE account=? AND native=? AND type='group'",
+        )
+        .get(this.config.id, session.channelId)
+    ) {
+      const controller = new AbortController();
+      this.initialGroupLookup = controller;
+      const signal = this.service.signal(
+        AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(Math.min(1000, this.service.config.timeout_ms)),
+        ]),
+      );
+      try {
+        conversationName = await this.service
+          .track(this.groupName(session.channelId, signal))
+          .catch(() => undefined);
+      } finally {
+        this.initialGroupLookup = undefined;
+      }
+      if (this.stopped || this.service.closed) return;
+    }
     const o: Observation = {
       native_id: session.messageId,
       conversation_native_id: session.channelId,
       conversation_type: session.isDirect ? "direct" : "group",
       sender: session.userId,
       name: session.event.user?.name,
+      conversation_name: conversationName,
       timestamp: session.timestamp,
       content,
       assets,

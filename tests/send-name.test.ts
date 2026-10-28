@@ -92,7 +92,11 @@ test("public send_message routes exact granted QQ group/contact and Matrix names
       minLength: 1,
       maxLength: 256,
     });
-    expect(schema.required).toEqual(["request_id", "content"]);
+    expect(schema.required).toEqual([
+      "request_id",
+      "content",
+      "conversation_name",
+    ]);
     f.platform.qqGroupName("qq-group", "Owned group");
     f.platform.sendQQ("C2C_MESSAGE_CREATE", "owned contact observation", {
       id: "named-contact",
@@ -107,6 +111,20 @@ test("public send_message routes exact granted QQ group/contact and Matrix names
           .get(),
     );
     await refresh();
+    await apply({
+      conversation_names: [
+        {
+          account_id: "qq-main",
+          conversation_id: "qq-group",
+          name: "Owned group",
+        },
+        {
+          account_id: "qq-main",
+          conversation_id: "qq-dm",
+          name: "Owned contact",
+        },
+      ],
+    });
     expect(
       (await send("group-name", { conversation_name: "Owned group" }))
         .structuredContent.status,
@@ -195,6 +213,8 @@ test("public send_message routes exact granted QQ group/contact and Matrix names
     await f.app.store.issue("other");
     await apply({
       conversation_names: [
+        { account_id: "qq-main", conversation_id: "qq-group", name: shared },
+        { account_id: "qq-main", conversation_id: "qq-dm", name: shared },
         {
           account_id: "matrix-main",
           conversation_id: "matrix-room",
@@ -227,7 +247,7 @@ test("public send_message routes exact granted QQ group/contact and Matrix names
         (await send(id, { conversation_name: shared, ...filters }))
           .structuredContent.status,
       ).toBe("sent");
-    // Same-account, same-type collisions still require exact IDs, never recency.
+    // Same-account, same-type collisions require a distinct name, never recency.
     const extra = known.find((c: any) => c.native_id === "hidden-group");
     const v = await f.app.view();
     await apply({
@@ -248,8 +268,15 @@ test("public send_message routes exact granted QQ group/contact and Matrix names
               ],
       })),
     });
-    f.platform.qqGroupName("hidden-group", shared);
-    await refresh();
+    await apply({
+      conversation_names: [
+        {
+          account_id: "qq-main",
+          conversation_id: extra.conversation_id,
+          name: shared,
+        },
+      ],
+    });
     const collisionCount = f.platform.sendCount;
     expect(
       (
@@ -261,13 +288,18 @@ test("public send_message routes exact granted QQ group/contact and Matrix names
       ).structuredContent.error.code,
     ).toBe("conflict");
     expect(f.platform.sendCount).toBe(collisionCount);
-    expect(
-      (
-        await send("id-fallback", {
+    await apply({
+      conversation_names: [
+        {
           account_id: "qq-main",
           conversation_id: "qq-group",
-        })
-      ).structuredContent.status,
+          name: "Distinct group",
+        },
+      ],
+    });
+    expect(
+      (await send("distinct-name", { conversation_name: "Distinct group" }))
+        .structuredContent.status,
     ).toBe("sent");
     for (const target of [
       {},
@@ -299,7 +331,8 @@ test("public send_message routes exact granted QQ group/contact and Matrix names
       (
         await call("get_conversation", {
           account_id: "qq-main",
-          conversation_id: "qq-dm",
+          conversation_name: shared,
+          conversation_type: "direct",
         })
       ).structuredContent.error.code,
     ).toBe("not_found");
@@ -315,6 +348,15 @@ test("name request pins survive rename, collision, restart, unknown reservation 
   try {
     f.platform.qqGroupName("qq-group", "Original name");
     await refresh();
+    await apply({
+      conversation_names: [
+        {
+          account_id: "qq-main",
+          conversation_id: "qq-group",
+          name: "Original name",
+        },
+      ],
+    });
     const target = { conversation_name: "Original name" };
     const first = await send("pinned-name", target);
     expect(first.structuredContent.status).toBe("sent");
@@ -335,6 +377,20 @@ test("name request pins survive rename, collision, restart, unknown reservation 
           .get(),
     );
     await refresh();
+    await apply({
+      conversation_names: [
+        {
+          account_id: "qq-main",
+          conversation_id: "qq-group",
+          name: "Renamed group",
+        },
+        {
+          account_id: "qq-main",
+          conversation_id: "qq-dm",
+          name: "Original name",
+        },
+      ],
+    });
     const count = f.platform.sendCount,
       calls = f.platform.calls.length;
     expect(
@@ -395,7 +451,7 @@ test("name request pins survive rename, collision, restart, unknown reservation 
 });
 
 test("pre-upgrade ID fingerprints still reconcile and concurrent exact name requests have one native send", async () => {
-  const { f, send, refresh } = await fixture();
+  const { f, send, refresh, apply } = await fixture();
   try {
     const oldInput =
       '{"account_id":"qq-main","conversation_id":"qq-group","request_id":"old-id","content":[{"type":"text","text":"original"}],"reply_to_message_id":"historical-post-message"}';
@@ -421,7 +477,7 @@ test("pre-upgrade ID fingerprints still reconcile and concurrent exact name requ
         await send(
           "old-id",
           {
-            conversation_id: "qq-group",
+            conversation_name: "QQ 群聊 1",
             account_id: "qq-main",
             reply_to_message_id: "historical-post-message",
           },
@@ -434,6 +490,15 @@ test("pre-upgrade ID fingerprints still reconcile and concurrent exact name requ
     ).toBe(true);
     f.platform.qqGroupName("qq-group", "Concurrent group");
     await refresh();
+    await apply({
+      conversation_names: [
+        {
+          account_id: "qq-main",
+          conversation_id: "qq-group",
+          name: "Concurrent group",
+        },
+      ],
+    });
     f.platform.holdNextSend(100);
     const startCount = f.platform.sendCount;
     const results = await Promise.all([
@@ -460,7 +525,7 @@ test("pre-upgrade ID fingerprints still reconcile and concurrent exact name requ
 });
 
 test("a name changed during preflight cannot silently retarget before native admission", async () => {
-  const { f, call, refresh } = await fixture();
+  const { f, call, refresh, apply } = await fixture();
   let release!: () => void;
   const held = new Promise<void>((resolve) => {
     release = resolve;
@@ -470,6 +535,15 @@ test("a name changed during preflight cannot silently retarget before native adm
   try {
     f.platform.qqGroupName("qq-group", "Before preflight");
     await refresh();
+    await apply({
+      conversation_names: [
+        {
+          account_id: "qq-main",
+          conversation_id: "qq-group",
+          name: "Before preflight",
+        },
+      ],
+    });
     const upload = await fetch(f.app.app.http!.url + "/assets", {
       method: "POST",
       headers: {
@@ -496,8 +570,9 @@ test("a name changed during preflight cannot silently retarget before native adm
     });
     try {
       await until(() => entered);
-      f.platform.qqGroupName("qq-group", "After preflight");
-      await refresh();
+      f.app.store.db
+        .prepare("UPDATE conversations SET name=? WHERE id=?")
+        .run("After preflight", "qq-group");
     } finally {
       release();
     }

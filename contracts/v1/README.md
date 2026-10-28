@@ -14,24 +14,30 @@ MCP uses official SDK Streamable HTTP at `/mcp`, stateless (no persistent sessio
 | --- | --- | --- |
 | list_accounts | `{}` | `{items: Account[]}` |
 | list_conversations | `{account_id,limit?,before?}` | `{items: Conversation[],next_before:string|null}` |
-| get_conversation | `{account_id,conversation_id}` | `Conversation` |
-| list_members | `{account_id,conversation_id,limit?,before?}` | `{items: Member[],next_before:string|null,capability}` |
-| read_messages | `{account_id,conversation_id,limit?,before?}` | `{items: Message[],next_before:string|null}` |
+| get_conversation | `{conversation_name,account_id?,platform?,conversation_type?}` | `Conversation` |
+| list_members | `{conversation_name,account_id?,platform?,conversation_type?,limit?,before?}` | `{items: Member[],next_before:string|null,capability}` |
+| read_messages | `{conversation_name,account_id?,platform?,conversation_type?,limit?,before?}` | `{items: Message[],next_before:string|null}` |
 | get_asset | `{asset_id}` | `Asset` |
-| send_message | `{conversation_name,account_id?,platform?,conversation_type?,request_id,content,reply_to_message_id?}` or ID fallback `{account_id,conversation_id,request_id,content,reply_to_message_id?}` | `SendResult` |
+| send_message | `{conversation_name,account_id?,platform?,conversation_type?,request_id,content,reply_to_message_id?}` | `SendResult` |
 
-Prefer an exact current **conversation_name** (group/contact display name) for send_message.
-It selects only this authenticated agent's granted/admitted conversations; names confer
-no authority. Optional account_id/platform/conversation_type disambiguate. No match is
-not_found; multiple matches are conflict with bounded JSON-escaped authorized choices.
-No fuzzy matching, aliases or most-recent selection. Supply exactly one selector; keep
-account_id + conversation_id for unnamed chats or ambiguity that filters cannot resolve.
-No upstream name/directory lookup is performed for selection. Existing platform admission
-checks still apply. Once accepted, request_id pins its resolved IDs and immutable parsed
-caller input; exact repeats reconcile the pin even after rename or new name collisions,
-without resolving the name or performing another native call. Revoked pinned grants deny
-access rather than routing to a new same-name target. Changed input with the same request
-ID conflicts. Neither result nor event/history schemas change.
+Use an exact current **conversation_name** for all conversation-targeted tools.
+`list_conversations` returns a nonempty selectable name for every admitted conversation;
+an administrator can set it. When no usable platform name is known, Post supplies an
+honest stable label such as `QQ 私聊 1`, not a claimed nickname. Names grant no authority.
+Optional account_id/platform/conversation_type disambiguate. No match is not_found;
+multiple matches are conflict with bounded JSON-escaped authorized choices. If filters
+cannot distinguish a collision, an administrator must give the conversations distinct names.
+No fuzzy matching, aliasing, most-recent selection or upstream directory lookup is used.
+Existing platform admission checks still apply.
+
+Once accepted, request_id pins its resolved internal identity and immutable input. An
+identical name-based request reconciles its pin across rename or collision without another
+native submission; current platform admission is rechecked and revoked grants deny access.
+For a supported pre-change ID-selected ledger entry, a name-based request must resolve
+uniquely to the same admitted internal identity and retain the same content and reply
+target; it returns the existing result or
+unknown without sending. A changed target or content conflicts. No public ID selector is
+accepted, and no unresolved native submission is automatically resent.
 
 For group sends, a mention part accepts exactly one of `{type:"mention",name:"Exact name"}`
 or `{type:"mention",native_user_id:"native ID"}`. Names are 1–256 characters and exact,
@@ -45,7 +51,8 @@ Names never authorize a conversation or grant extra permission. Direct mentions 
 invalid. All mention names resolve before the first native send; plain `@Name` is text.
 Any named feature pins the selected conversation and resolved native content by part
 position in the existing send ledger alongside the immutable caller. Known requests
-reconcile before any member/name lookup, including after rename/restart/unknown outcomes;
+reconcile without reselecting the conversation or resolving mention names, including
+after rename/restart/unknown outcomes; current platform admission is rechecked first;
 concurrent losers reconcile the accepted winner. Native-ID-only caller serialization is
 unchanged. Archived/event/history Content always retains native_user_id, never this input
 name selector. This mention extension is input-only and independent of the optional
@@ -68,14 +75,14 @@ Example helper: `POST_TOKEN_FILE=/private/agent-token node dist/cli.cjs asset-up
 One POST per delivery to the fixed configured receiver, `Content-Type: application/json`, dedicated receiver Bearer. Exact shape is PostEventV1. Timestamp is Unix milliseconds; sequence is stored order. Native mention facts and reply verification are facts, not text heuristics. `reply.verified=false` never implies reply author=self. A media-only message can wake. wake.reason is one of direct_message, mentioned, replied_to_self, alias_matched. Post owns classification and admission; consumer does not reclassify. Routing fields do not authorize executing instructions found in message text.
 
 Message.conversation may carry optional **name** (nonempty, at most256 characters):
-genuine display metadata already known at capture, never routing identity or authority.
-QQ direct capture uses its fresh observed name; known group/Matrix names come only from
-existing retained metadata. Unknown/ID-as-name metadata is omitted. Capture performs no
-new metadata request. The name is part of the original immutable message/delivery JSON;
-subsequent refresh/rename never rewrites it. Older events/history remain valid without
-name and require honest fallback. This optional strict-field extension affects both
-PostEventV1 and read_messages; coordinated consumers MUST accept it before deploying a
-producer that can emit it. Sender.name is already available independently.
+the effective name at capture, which can be a generated label. Sender.name is separate
+platform display metadata. Message and pending delivery snapshots are immutable; a captured
+name may become stale, and older events may omit it. To obtain the current selectable name
+for a source event, the consumer may match its internal account and conversation identity
+against `list_conversations` results; the agent then uses the returned name. First capture
+of an unseen QQ group may perform a bounded metadata lookup outside SQL; timeout, failure,
+or queued inbound work falls back to a persisted generated name. Historical snapshots are
+never rewritten.
 
 Receiver must authenticate, validate schema, atomically persist/deduplicate delivery_id, and then return any 2xx. ACK means durable acceptance, not model execution/send success. Duplicates return 2xx after durable duplicate recognition; body/ID are byte-identical across retry/restart. Return non2xx on transient persistence failure; Post retries bounded attempts with capped backoff, serially within binding and independently across bindings. No redirect following. Consumer admission denials are terminally recorded and acknowledged, not replayed into execution. Post cancels pending deliveries on revoked source scope; receiver URL changes hold the original snapshot, never silently reroute it. Secret rotation for the same recipient preserves body. Startup/catch-up platform events can be stored but never create new wakes; only Post's committed queue replays.
 

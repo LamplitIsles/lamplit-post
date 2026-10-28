@@ -155,14 +155,14 @@ test("SDK configuration restart preserves exclusive owner, pins, unknown sends, 
     await expect(
       f.app.app.service!.call("second", "read_messages", {
         account_id: "qq-main",
-        conversation_id: "qq-group",
+        conversation_name: "QQ 群聊 1",
       }),
     ).rejects.toThrow();
     expect(
       (
         (await f.app.app.service!.call("cfl", "read_messages", {
           account_id: "qq-main",
-          conversation_id: "qq-group",
+          conversation_name: "QQ 群聊 1",
         })) as any
       ).items.length,
     ).toBe(1);
@@ -277,7 +277,7 @@ test("actual native send and immutable pending delivery retire across settings a
     f.platform.stall();
     const input = {
       account_id: "qq-main",
-      conversation_id: "qq-group",
+      conversation_name: "QQ 群聊 1",
       request_id: "during-settings-apply",
       content: [{ type: "text", text: "fixture-native-pending" }],
     };

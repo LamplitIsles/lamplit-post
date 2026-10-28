@@ -11,8 +11,8 @@ import type { MatrixUserBot } from "../src/matrix";
 import { platformsFixture } from "./fixtures/platforms";
 import { stateFixture, until } from "./fixtures/state";
 import { consumerFixture } from "./fixtures/consumer";
-const qq = { account_id: "qq-main", conversation_id: "qq-group" };
-const dm = { account_id: "qq-main", conversation_id: "qq-dm" };
+const qq = { account_id: "qq-main", conversation_name: "QQ 群聊 1" };
+const dm = { account_id: "qq-main", conversation_name: "QQ 私聊 2" };
 async function connect(url: string, token: string) {
   const client = new Client({ name: "review-regression", version: "1" });
   await client.connect(
@@ -176,7 +176,7 @@ test("image MIME and bytes preflight reject the entire send before native dispat
     const asset = (await upload.json()) as any;
     for (const target of [
       qq,
-      { account_id: "matrix-main", conversation_id: "matrix-room" },
+      { account_id: "matrix-main", conversation_name: "Matrix 群聊 3" },
     ]) {
       const output = await f.call("send_message", {
         ...target,

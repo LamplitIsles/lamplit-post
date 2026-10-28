@@ -16,6 +16,7 @@ import type {
   QrConnectCredentials,
 } from "@tencent-connect/qqbot-connector";
 import { randomBytes } from "node:crypto";
+import { ensureConversationName } from "./conversation-name";
 class Unauthorized extends Error {}
 function auth(value: unknown): asserts value {
   if (!value) throw new Unauthorized();
@@ -459,42 +460,25 @@ export async function serveSettings(
                 need(authorizedDraft || platform?.ready, "unavailable");
                 const observed = settings.store.db
                   .prepare(
-                    "SELECT c.id, c.native, c.type, c.name, EXISTS(SELECT 1 FROM messages m WHERE m.account=c.account AND m.conversation=c.id) AS observed FROM conversations c WHERE c.account=? ORDER BY c.seq DESC LIMIT 200",
+                    "SELECT c.seq, c.id, c.native, c.type, c.name, EXISTS(SELECT 1 FROM messages m WHERE m.account=c.account AND m.conversation=c.id) AS observed FROM conversations c WHERE c.account=? ORDER BY c.seq DESC LIMIT 200",
                   )
                   .all(account.id)
                   .map((r) => ({
                     conversation_id: r.id,
                     native_id: r.native,
                     type: r.type,
-                    name: r.name ?? undefined,
+                    name:
+                      r.name && String(r.name).trim()
+                        ? r.name
+                        : settings.store.transaction((db) =>
+                            ensureConversationName(
+                              db,
+                              r as any,
+                              account.platform,
+                            ),
+                          ),
                     source: r.observed ? "observed" : "configured",
                   }));
-                if (platform instanceof QQPlatform) {
-                  const signal = AbortSignal.any([
-                    service.signal(controller.signal),
-                    AbortSignal.timeout(
-                      Math.min(settings.config.timeout_ms, 8000),
-                    ),
-                  ]);
-                  // This explicit refresh enriches known groups, never enumerates a directory.
-                  for (const item of observed
-                    .filter((c) => c.type === "group")
-                    .slice(0, 20)) {
-                    if (signal.aborted) break;
-                    const name = await service
-                      .track(platform.groupName(String(item.native_id), signal))
-                      .catch(() => undefined);
-                    if (signal.aborted) break;
-                    if (name) {
-                      settings.store.db
-                        .prepare(
-                          "UPDATE conversations SET name=? WHERE account=? AND id=?",
-                        )
-                        .run(name, account.id, item.conversation_id);
-                      item.name = name;
-                    }
-                  }
-                }
                 if (!(platform instanceof MatrixUserBot))
                   return {
                     items: observed,
@@ -507,7 +491,18 @@ export async function serveSettings(
                 );
                 return {
                   items: [
-                    ...items,
+                    ...items.map((item) => {
+                      const existing = observed.find(
+                        (o) => o.native_id === item.native_id,
+                      );
+                      return existing
+                        ? {
+                            ...item,
+                            conversation_id: existing.conversation_id,
+                            name: existing.name,
+                          }
+                        : item;
+                    }),
                     ...observed.filter(
                       (o) => !items.some((i) => i.native_id === o.native_id),
                     ),

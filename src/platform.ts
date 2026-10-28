@@ -6,6 +6,7 @@ export interface Observation {
   conversation_type: "direct" | "group";
   sender: string;
   name?: string;
+  conversation_name?: string;
   timestamp: number;
   content: ContentV1[];
   assets: MessageV1["assets"];

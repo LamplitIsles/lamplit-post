@@ -170,7 +170,7 @@ test("actual platform restart stores initial catchup without waking and reopens 
     );
     const args = {
       account_id: "qq-main",
-      conversation_id: "qq-group",
+      conversation_name: "QQ 群聊 1",
       request_id: "repeat-after-restart",
       content: [{ type: "text", text: "one send" }],
     };
@@ -205,7 +205,7 @@ test("actual platform restart stores initial catchup without waking and reopens 
     );
     const unknown = await r.service.call("cfl", "send_message", {
       account_id: "qq-main",
-      conversation_id: "qq-group",
+      conversation_name: "QQ 群聊 1",
       request_id: "crash-pending",
       content: [{ type: "text", text: "pending" }],
     });

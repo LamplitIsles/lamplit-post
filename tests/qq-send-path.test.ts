@@ -1,6 +1,104 @@
 import { test, expect, vi } from "vitest";
 import { settingsFixture } from "./fixtures/settings";
 import { until } from "./fixtures/state";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+test("MCP discovery exposes one name-based conversation selector", async () => {
+  const f = await settingsFixture();
+  const client = new Client({ name: "owned-discovery", version: "1.0.0" });
+  try {
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(f.app.app.http!.url + "/mcp"), {
+        requestInit: { headers: { Authorization: "Bearer " + f.state.token } },
+      }),
+    );
+    const listed = await client.listTools();
+    for (const name of [
+      "get_conversation",
+      "list_members",
+      "read_messages",
+      "send_message",
+    ]) {
+      const schema = listed.tools.find((t) => t.name === name)!.inputSchema;
+      expect(schema.required).toContain("conversation_name");
+      expect(schema.properties).not.toHaveProperty("conversation_id");
+      const { $schema, ...compatibleSchema } = schema;
+      const validate = new AjvJsonSchemaValidator().getValidator(
+        compatibleSchema,
+      );
+      const other =
+        name === "send_message"
+          ? { request_id: "owned", content: [{ type: "text", text: "owned" }] }
+          : {};
+      expect(validate({ conversation_name: "Owned", ...other }).valid).toBe(
+        true,
+      );
+      expect(
+        validate({ account_id: "qq-main", conversation_id: "qq-dm", ...other })
+          .valid,
+      ).toBe(false);
+    }
+  } finally {
+    await client.close();
+    await f.close();
+  }
+});
+
+test("MCP reports invalid incident selector as input error before QQ handoff", async () => {
+  const f = await settingsFixture();
+  const client = new Client({ name: "owned-send", version: "1.0.0" });
+  try {
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(f.app.app.http!.url + "/mcp"), {
+        requestInit: { headers: { Authorization: "Bearer " + f.state.token } },
+      }),
+    );
+    const result = await client.callTool({
+      name: "send_message",
+      arguments: {
+        account_id: "qq-main",
+        conversation_id: "qq-dm",
+        platform: "qq",
+        conversation_type: "direct",
+        request_id: "owned-incident",
+        content: [{ type: "text", text: "owned fixture" }],
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as any).error).toEqual({
+      code: "invalid_request",
+      message: "Invalid tool arguments. Check the tool schema.",
+    });
+    expect(
+      f.platform.calls.filter((c) => c.path.endsWith("/messages")),
+    ).toHaveLength(0);
+    expect(
+      f.app.store.db.prepare("SELECT count(*) n FROM sends").get()!.n,
+    ).toBe(0);
+    const sent = await client.callTool({
+      name: "send_message",
+      arguments: {
+        account_id: "qq-main",
+        conversation_name: f.app.app.service!.conversation(
+          f.app.store.db
+            .prepare("SELECT * FROM conversations WHERE id=?")
+            .get("qq-dm"),
+        ).name,
+        request_id: "owned-valid",
+        content: [{ type: "text", text: "owned fixture" }],
+      },
+    });
+    expect((sent.structuredContent as any).status).toBe("sent");
+    expect(
+      f.platform.calls.filter((c) => c.path.endsWith("/messages")),
+    ).toHaveLength(1);
+  } finally {
+    await client.close();
+    await f.close();
+  }
+});
 
 test("public MCP QQ replies preserve native anchor/sequence and reject old or wrong Post IDs before dispatch; refusal and unknown results never resend", async () => {
   const f = await settingsFixture();
@@ -53,7 +151,7 @@ test("public MCP QQ replies preserve native anchor/sequence and reject old or wr
     const history = (
       await call("read_messages", {
         account_id: "qq-main",
-        conversation_id: "qq-group",
+        conversation_name: "QQ 群聊 1",
       })
     ).structuredContent.items;
     const fresh = history.find(
@@ -63,7 +161,7 @@ test("public MCP QQ replies preserve native anchor/sequence and reject old or wr
     const privateHistory = (
       await call("read_messages", {
         account_id: "qq-main",
-        conversation_id: "qq-dm",
+        conversation_name: "QQ 私聊 2",
       })
     ).structuredContent.items;
     await until(
@@ -75,12 +173,12 @@ test("public MCP QQ replies preserve native anchor/sequence and reject old or wr
     const matrixHistory = (
       await call("read_messages", {
         account_id: "matrix-main",
-        conversation_id: "matrix-room",
+        conversation_name: "Matrix 群聊 3",
       })
     ).structuredContent.items;
     const base = {
       account_id: "qq-main",
-      conversation_id: "qq-group",
+      conversation_name: "QQ 群聊 1",
       content: [{ type: "text", text: "owned reply" }],
     };
     const send = (request_id: string, reply_to_message_id?: string) =>

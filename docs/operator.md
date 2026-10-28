@@ -137,6 +137,13 @@ backup prerequisite is imposed by this conversion.
 
 ## QQ send diagnostics
 
+For conversation operations, supply the exact current `conversation_name`;
+optional account, platform and conversation-type filters distinguish matches.
+An administrator can rename a conversation; an unnamed conversation receives a
+stable generated label. Invalid tool arguments return a safe
+`invalid_request` message before any native submission; check the advertised
+tool schema rather than treating that error as a QQ availability failure.
+
 `reply_to_message_id` identifies an admitted **Post message**, in the same account
 and conversation. A native QQ message ID is not a Post reference. Post rejects a
 QQ reference target at least295seconds old before submission; the safe MCP error

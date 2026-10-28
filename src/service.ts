@@ -5,6 +5,7 @@ import { Config, Binding, Scope, accountOwner } from "./config";
 import { Store, opaque, digest, checkConversationPin } from "./store";
 import { Assets } from "./assets";
 import { Fault, need } from "./errors";
+import { ensureConversationName } from "./conversation-name";
 import type { Observation, Platform } from "./platform";
 import {
   Message,
@@ -34,7 +35,7 @@ export class Service {
     this.store.transaction((db) => {
       for (const b of this.config.bindings)
         for (const scope of b.scopes) {
-          const r = (
+          let r = (
             db
               .prepare("SELECT * FROM conversations WHERE `id` = ?")
               .all(
@@ -43,7 +44,7 @@ export class Service {
           )[0];
           if (r) checkConversationPin(r, scope);
           else
-            db
+            r = db
               .prepare(
                 "INSERT INTO conversations (`id`,`account`,`native`,`type`) VALUES (?,?,?,?) RETURNING *",
               )
@@ -53,6 +54,10 @@ export class Service {
                 scope.native_id,
                 scope.type,
               ) as unknown as Tables["conversations"];
+          const account = this.config.accounts.find(
+            (a) => a.id === scope.account_id,
+          )!;
+          ensureConversationName(db, r, account.platform);
         }
     });
   }
@@ -246,6 +251,7 @@ export class Service {
             o.conversation_native_id,
             o.conversation_type,
           ) as unknown as Tables["conversations"];
+        const created = !conv;
         if (!conv)
           conv = db
             .prepare(
@@ -257,18 +263,16 @@ export class Service {
               o.conversation_native_id,
               o.conversation_type,
             ) as unknown as Tables["conversations"];
-        if (
-          a.platform === "qq" &&
-          conv.type === "direct" &&
-          direction === "inbound" &&
-          o.name?.trim()
-        ) {
-          conv.name = o.name.trim().slice(0, 256);
-          db.prepare("UPDATE conversations SET name=? WHERE id=?").run(
-            conv.name,
-            conv.id,
-          );
-        }
+        ensureConversationName(
+          db,
+          conv,
+          a.platform,
+          created && a.platform === "qq" && direction === "inbound"
+            ? conv.type === "direct"
+              ? o.name
+              : o.conversation_name
+            : undefined,
+        );
         const native = o.mutation
           ? o.native_id + ":" + o.mutation
           : o.native_id;
@@ -298,7 +302,7 @@ export class Service {
             )[0]
           : null;
         const reply = replied ? (JSON.parse(replied.body) as MessageV1) : null;
-        const conversationName = conv.name?.trim().slice(0, 256);
+        const currentName = conv.name!;
         const m: MessageV1 = {
           id,
           account_id: account,
@@ -307,11 +311,7 @@ export class Service {
             id: conv.id,
             native_id: conv.native,
             type: conv.type,
-            ...(conversationName &&
-            conversationName !== conv.native &&
-            conversationName !== conv.id
-              ? { name: conversationName }
-              : {}),
+            name: currentName,
           },
           sender: { native_id: o.sender, ...(o.name ? { name: o.name } : {}) },
           timestamp: o.timestamp,
@@ -487,7 +487,13 @@ export class Service {
     parent?: AbortSignal,
   ): Promise<any> {
     need(!this.closed, "unavailable");
-    const args = ToolInputs[name].parse(input) as any;
+    const parsed = ToolInputs[name].safeParse(input);
+    if (!parsed.success)
+      throw new Fault(
+        "invalid_request",
+        "Invalid tool arguments. Check the tool schema.",
+      );
+    const args = parsed.data as any;
     const signal = this.signal(parent);
     this.bindings(agent);
     if (name === "list_accounts") {
@@ -554,12 +560,9 @@ export class Service {
             : null,
       };
     }
-    const scope = await this.check(
-      agent,
-      args.account_id,
-      args.conversation_id,
-      signal,
-    );
+    const selection = await this.conversationTarget(agent, args, signal);
+    selection.validate();
+    const { scope } = selection;
     const conv = (
       this.store.db
         .prepare("SELECT * FROM conversations WHERE `id` = ? AND `account` = ?")
@@ -570,13 +573,14 @@ export class Service {
     )[0];
     need(conv);
     if (name === "get_conversation") return this.conversation(conv);
-    const query = name + ":" + args.account_id + ":" + args.conversation_id,
+    const query = name + ":" + scope.account_id + ":" + scope.conversation_id,
       offset = this.offset(agent, query, args.before),
       limit = args.limit ?? 20;
     if (name === "list_members") {
       const result = await this.platforms
         .get(scope.account_id)!
         .members(scope, signal);
+      selection.validate();
       const start = offset === Number.MAX_SAFE_INTEGER ? 0 : offset;
       const items = result.items.slice(start, start + limit);
       return {
@@ -623,18 +627,19 @@ export class Service {
     };
   }
   conversation(r: any) {
+    const platform = this.config.accounts.find(
+      (a) => a.id === r.account,
+    )!.platform;
     return {
       account_id: r.account,
       conversation_id: r.id,
       native_id: r.native,
       type: r.type,
-      ...(r.name &&
-      !(
-        this.config.accounts.find((a) => a.id === r.account)?.platform ===
-          "qq" && r.name === r.native
-      )
-        ? { name: r.name }
-        : {}),
+      name: r.name?.trim()
+        ? r.name
+        : this.store.transaction((db) =>
+            ensureConversationName(db, r, platform),
+          ),
       capabilities: this.capabilities(r.account),
     };
   }
@@ -652,20 +657,11 @@ export class Service {
     return s;
   }
   /** First admission only: names select existing authority; they never create it. */
-  private async sendTarget(agent: string, args: any, signal: AbortSignal) {
-    if (args.conversation_name === undefined) {
-      const scope = await this.check(
-        agent,
-        args.account_id,
-        args.conversation_id,
-        signal,
-      );
-      return {
-        scope,
-        validate: () =>
-          this.scope(agent, scope.account_id, scope.conversation_id),
-      };
-    }
+  private async conversationTarget(
+    agent: string,
+    args: any,
+    signal: AbortSignal,
+  ) {
     const candidates = () => {
       const found = new Map<string, Scope>();
       for (const b of this.bindings(agent))
@@ -709,12 +705,12 @@ export class Service {
     if (!eligible.length)
       throw new Fault(
         "not_found",
-        "No admitted conversation has that exact current name. Use an exact name from get_conversation/list_conversations, or its account_id + conversation_id when unnamed.",
+        "No admitted conversation has that exact current name. Use a name from list_conversations.",
       );
     if (eligible.length > 1)
       throw new Fault(
         "conflict",
-        "Several admitted conversations have that exact name. Specify account_id, platform or conversation_type; use exact IDs if still ambiguous. Choices (at most 8): " +
+        "Several admitted conversations have that exact name. Specify account_id, platform or conversation_type, or ask the administrator to give them distinct names. Choices (at most 8): " +
           JSON.stringify(
             eligible.slice(0, 8).map((s) => ({
               conversation_name: args.conversation_name,
@@ -722,7 +718,6 @@ export class Service {
                 .platform,
               conversation_type: s.type,
               account_id: s.account_id,
-              conversation_id: s.conversation_id,
             })),
           ),
       );
@@ -802,12 +797,10 @@ export class Service {
             "conflict",
             "Several members have that exact name. Use native_user_id. Choices (at most 8): " +
               JSON.stringify(
-                matches
-                  .slice(0, 8)
-                  .map((native_user_id) => ({
-                    name: part.name,
-                    native_user_id,
-                  })),
+                matches.slice(0, 8).map((native_user_id) => ({
+                  name: part.name,
+                  native_user_id,
+                })),
               ),
           );
         return { type: "mention", native_user_id: matches[0]! };
@@ -826,27 +819,49 @@ export class Service {
   }
   async send(agent: string, args: any, signal: AbortSignal): Promise<Send> {
     const serialized = JSON.stringify(args);
-    const named =
-      args.conversation_name !== undefined ||
-      args.content.some(
-        (p: any) => p.type === "mention" && p.name !== undefined,
-      );
     const old = (
       this.store.db
         .prepare("SELECT * FROM sends WHERE `agent` = ? AND `request` = ?")
         .all(agent, args.request_id) as unknown as Tables["sends"][]
     )[0];
     if (old) {
-      const accepted = named
-        ? JSON.parse(old.input)
-        : { caller: old.input, target: args };
-      need(accepted.caller === serialized, "conflict");
-      // Reconcile the durable pin before any current-name lookup or native I/O.
+      const stored = JSON.parse(old.input);
+      const accepted =
+        typeof stored.caller === "string"
+          ? { caller: JSON.parse(stored.caller), target: stored.target }
+          : { caller: stored, target: stored };
+      // Reconcile the durable pin without reselecting the current name.
       this.scope(
         agent,
         accepted.target.account_id,
         accepted.target.conversation_id,
       );
+      if (accepted.caller.conversation_name !== undefined) {
+        need(JSON.stringify(accepted.caller) === serialized, "conflict");
+        await this.check(
+          agent,
+          accepted.target.account_id,
+          accepted.target.conversation_id,
+          signal,
+        );
+        this.scope(
+          agent,
+          accepted.target.account_id,
+          accepted.target.conversation_id,
+        );
+      } else {
+        const selection = await this.conversationTarget(agent, args, signal);
+        selection.validate();
+        need(
+          selection.scope.account_id === accepted.target.account_id &&
+            selection.scope.conversation_id ===
+              accepted.target.conversation_id &&
+            JSON.stringify(accepted.caller.content) ===
+              JSON.stringify(args.content) &&
+            accepted.caller.reply_to_message_id === args.reply_to_message_id,
+          "conflict",
+        );
+      }
       return old.result
         ? JSON.parse(old.result)
         : {
@@ -856,7 +871,7 @@ export class Service {
             stored: false,
           };
     }
-    const selection = await this.sendTarget(agent, args, signal);
+    const selection = await this.conversationTarget(agent, args, signal);
     const { scope } = selection;
     const mentions = await this.mentionContent(
       agent,
@@ -865,16 +880,14 @@ export class Service {
       signal,
     );
     const content = mentions.content;
-    const input = named
-      ? JSON.stringify({
-          caller: serialized,
-          target: {
-            account_id: scope.account_id,
-            conversation_id: scope.conversation_id,
-          },
-          content,
-        })
-      : serialized;
+    const input = JSON.stringify({
+      caller: serialized,
+      target: {
+        account_id: scope.account_id,
+        conversation_id: scope.conversation_id,
+      },
+      content,
+    });
     const reply = args.reply_to_message_id
       ? await this.message(args.reply_to_message_id)
       : null;

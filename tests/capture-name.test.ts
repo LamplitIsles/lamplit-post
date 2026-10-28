@@ -53,7 +53,16 @@ test("SDK capture snapshots genuine optional names into strict archive/delivery/
         method: "tools/call",
         params: {
           name: "read_messages",
-          arguments: { account_id, conversation_id },
+          arguments: {
+            account_id,
+            conversation_name: runtime().service!.conversation(
+              runtime()
+                .store!.db.prepare(
+                  "SELECT * FROM conversations WHERE account=? AND id=?",
+                )
+                .get(account_id, conversation_id),
+            ).name,
+          },
         },
       }),
     });
@@ -95,14 +104,41 @@ test("SDK capture snapshots genuine optional names into strict archive/delivery/
       }),
     ).toBe(true);
     await native("group-before-metadata");
-    expect(find("group-before-metadata").conversation.name).toBeUndefined();
+    expect(find("group-before-metadata").conversation.name).toBe("QQ 群聊 1");
+    const initial = await f.app.view();
+    expect(
+      (
+        await f.apply("settings", {
+          version: initial.version,
+          accounts: initial.accounts.map(({ hasCredential, ready, ...a }) => a),
+          agents: initial.agents.map(({ hasCredential, hasToken, ...a }) => a),
+          bindings: initial.bindings.map((b) => ({
+            ...b,
+            scopes: b.scopes.map(({ name, ...s }) => s),
+          })),
+          conversation_names: [
+            {
+              account_id: "qq-main",
+              conversation_id: "qq-group",
+              name: "Genuine group",
+            },
+            {
+              account_id: "qq-main",
+              conversation_id: "qq-dm",
+              name: "Old contact",
+            },
+          ],
+        })
+      ).status,
+    ).toBe(200);
     await native("direct-old-name", true, "Old contact");
     expect.soft(find("direct-old-name").conversation.name).toBe("Old contact");
     const fresh = 'Fresh "contact"\n' + "x".repeat(300);
     await native("direct-fresh-name", true, "  " + fresh + "  ");
     expect
       .soft(find("direct-fresh-name").conversation.name)
-      .toBe(fresh.slice(0, 256));
+      .toBe("Old contact");
+    expect(find("direct-fresh-name").sender.name).toBe("  " + fresh + "  ");
     expect(
       f.platform.calls.filter((c) => c.path.endsWith("/info")),
     ).toHaveLength(0);
@@ -131,7 +167,7 @@ test("SDK capture snapshots genuine optional names into strict archive/delivery/
           (e) => e.message.native_message_id === "direct-fresh-name",
         )!.message.conversation.name,
       )
-      .toBe(fresh.slice(0, 256));
+      .toBe("Old contact");
     expect
       .soft(
         capturedEvents.find(
@@ -143,21 +179,13 @@ test("SDK capture snapshots genuine optional names into strict archive/delivery/
       capturedEvents.find(
         (e) => e.message.native_message_id === "group-before-metadata",
       )!.message.conversation.name,
-    ).toBeUndefined();
+    ).toBe("QQ 群聊 1");
     const beforeDuplicate = rows().length,
       beforeDeliveries = deliveries().length;
     await native(
       "direct-old-name",
       true,
       "Duplicate metadata is not a new message",
-    );
-    await until(
-      () =>
-        runtime()
-          .store!.db.prepare(
-            "SELECT name FROM conversations WHERE account='qq-main' AND native='qq-owner'",
-          )
-          .get()!.name === "Duplicate metadata is not a new message",
     );
     // Wait on the existing serialized adapter chain, not a timing sleep.
     await (
@@ -168,19 +196,19 @@ test("SDK capture snapshots genuine optional names into strict archive/delivery/
     expect(rows()).toHaveLength(beforeDuplicate);
     expect(deliveries()).toHaveLength(beforeDeliveries);
     checkBytes(oldMessages, oldEvents);
-    // ID-as-name fallback is never promoted into this new display metadata.
+    // Later platform metadata, including ID-shaped metadata, cannot replace saved names.
     f.platform.qqGroupName("qq-group", "qq-group");
     await refresh();
     await native("group-id-fallback");
-    expect(find("group-id-fallback").conversation.name).toBeUndefined();
+    expect(find("group-id-fallback").conversation.name).toBe("Genuine group");
     await native("direct-id-fallback", true, "qq-owner");
-    expect(find("direct-id-fallback").conversation.name).toBeUndefined();
+    expect(find("direct-id-fallback").conversation.name).toBe("Old contact");
     f.platform.sendMatrix(
       { body: "Post, no retained display metadata", msgtype: "m.text" },
       { event_id: "$matrix-unknown" },
     );
     await until(() => !!rows().find((r) => r.native === "$matrix-unknown"));
-    expect(find("$matrix-unknown").conversation.name).toBeUndefined();
+    expect(find("$matrix-unknown").conversation.name).toBe("Matrix 群聊 3");
     // Matrix capture uses already retained genuine metadata, not capture-time discovery.
     const matrix = await (
       await f.request("discover", { account_id: "matrix-main" })
@@ -238,7 +266,7 @@ test("SDK capture snapshots genuine optional names into strict archive/delivery/
     expect(
       group.find((m) => m.native_message_id === "group-before-metadata")!
         .conversation.name,
-    ).toBeUndefined();
+    ).toBe("QQ 群聊 1");
     expect
       .soft(
         direct.find((m) => m.native_message_id === "direct-old-name")!
@@ -250,7 +278,7 @@ test("SDK capture snapshots genuine optional names into strict archive/delivery/
         direct.find((m) => m.native_message_id === "direct-fresh-name")!
           .conversation.name,
       )
-      .toBe(fresh.slice(0, 256));
+      .toBe("Old contact");
     expect
       .soft(
         (await call("matrix-main", "matrix-room")).find(
@@ -262,7 +290,7 @@ test("SDK capture snapshots genuine optional names into strict archive/delivery/
       (await call("matrix-main", "matrix-room")).find(
         (m) => m.native_message_id === "$matrix-unknown",
       )!.conversation.name,
-    ).toBeUndefined();
+    ).toBe("Matrix 群聊 3");
     const sample = find("group-before-metadata");
     expect
       .soft(

@@ -236,11 +236,12 @@ in a multi-account binding preserves its other accounts and scopes. Collapsed ro
 platform icons, account names and status; **详情与编辑** contains chat/wake/identity detail
 and actions. Native QQ `share_url` remains a bot invitation link, not account sharing.
 
-Matrix room names are display metadata in the existing conversation store. Selection
-saves bounded labels for selected rooms; reload needs no upstream lookup. IDs and
-pins remain authoritative. Successful explicit Matrix verification also refreshes
-matching selected labels; other accounts and grant fields remain unchanged. Missing
-names fall back to IDs. There is no name polling.
+Conversation names are editable in the selected-chat step. The stored name takes
+priority over later platform metadata; reload needs no upstream lookup. Existing
+nonempty names are preserved, including names that resemble IDs. IDs and
+pins remain authoritative. When a conversation has no usable name, Post shows a
+stable generated label such as **QQ 私聊 1**; this label does not claim to be the
+contact's nickname and can be replaced by the administrator. There is no name polling.
 
 QQ search is the locally observed/configured directory, not a complete upstream
 QQ group list. Save/connect the bot first, add it to the group and @mention it there,
@@ -254,16 +255,18 @@ assert that Tencent has no other APIs. The supported event includes group_openid
 [official native mention event](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html).
 
 QQ candidates, selected chats, confirmation and saved details distinguish **群聊**
-and **私聊**. Private names come from actual observed sender metadata. Explicit
-**读取可用聊天 / 重试** also tries the public known-group metadata method for up to20
-locally known groups, under one best-effort budget of the smaller of the existing
-native deadline and8seconds. This stays within the settings listener's existing10second
-idle allowance; failures keep local candidates and an honest **名称不可用** fallback.
-Names reuse the existing conversation store, with no startup fetch, polling or extra
-cache. OpenIDs stay secondary and remain searchable; names never change pins or grants.
-Authorized consumers can read the same names/type through existing v1
-`get_conversation`/`list_conversations`. Events/history already carry conversation
-type; their fixed message schema does not add a name field. Observed candidates
+and **私聊**. A first observation of a new group tries the public known-group
+metadata method before capture when no other inbound work is queued, within the
+smaller of the native deadline and one second. An existing queue skips the lookup;
+failure, timeout or newly queued work ends it. Post then saves a generated label
+and still archives the message in order.
+Private names can come from the first observed sender metadata. Existing nonempty
+names, including generated and administrator-set names, are never overwritten by
+later lookups. Names reuse the existing conversation store, with no startup fetch,
+polling or extra cache. OpenIDs stay secondary and remain searchable; names never change pins or grants.
+Authorized consumers use current names through the v1 conversation tools. New events
+and history snapshots carry the capture-time name; older snapshots may omit it and
+renames never rewrite them. Observed candidates
 with no explicit chat/peer grant remain inaccessible to consumers.
 
 QQ history remains locally observed. Authorized ordinary group messages that reach

@@ -14,6 +14,7 @@ import type { TransportFixture } from "./host";
 import { Store, digest } from "./store";
 import { Fault, need } from "./errors";
 import { atomicPrivate } from "./admin";
+import { ensureConversationName } from "./conversation-name";
 export class Settings {
   app!: Application;
   store!: Store;
@@ -175,15 +176,25 @@ export class Settings {
       })),
       bindings: this.config.bindings.map((b) => ({
         ...b,
-        scopes: b.scopes.map((s) => ({
-          ...s,
-          name:
-            this.store.db
-              .prepare(
-                "SELECT name FROM conversations WHERE account=? AND id=?",
-              )
-              .get(s.account_id, s.conversation_id)?.name ?? null,
-        })),
+        scopes: b.scopes.map((s) => {
+          const row = this.store.db
+            .prepare("SELECT * FROM conversations WHERE account=? AND id=?")
+            .get(s.account_id, s.conversation_id) as any;
+          const platform = this.config.accounts.find(
+            (a) => a.id === s.account_id,
+          )?.platform;
+          return {
+            ...s,
+            name:
+              row && platform
+                ? row.name?.trim()
+                  ? row.name
+                  : this.store.transaction((db) =>
+                      ensureConversationName(db, row, platform),
+                    )
+                : null,
+          };
+        }),
       })),
     };
   }

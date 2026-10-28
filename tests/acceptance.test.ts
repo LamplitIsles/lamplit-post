@@ -43,8 +43,8 @@ async function fixture(timeout = 1500) {
     },
   };
 }
-const qq = { account_id: "qq-main", conversation_id: "qq-group" },
-  matrix = { account_id: "matrix-main", conversation_id: "matrix-room" };
+const qq = { account_id: "qq-main", conversation_name: "QQ 群聊 1" },
+  matrix = { account_id: "matrix-main", conversation_name: "Matrix 群聊 3" };
 test("remote asset upload/download, both native file/image roundtrips, audio/video retrieval", async () => {
   const f = await fixture();
   try {
@@ -183,7 +183,7 @@ test("all seven projections and raw assets enforce separate agent scope and priv
     await expect(
       f.r.service.call("other", "read_messages", {
         account_id: "qq-main",
-        conversation_id: "qq-dm",
+        conversation_name: "QQ 私聊 2",
       }),
     ).rejects.toThrow();
     for (const [name, args] of [
@@ -217,7 +217,7 @@ test("all seven projections and raw assets enforce separate agent scope and priv
     await expect(
       f.r.service.call("other", "send_message", {
         account_id: "qq-main",
-        conversation_id: "qq-dm",
+        conversation_name: "QQ 私聊 2",
         request_id: "stolen",
         content: [{ type: "file", asset_id: asset.asset_id }],
       }),
@@ -457,7 +457,7 @@ test("strict config rejects unknown fields, duplicate IDs and unsafe refs", asyn
 test("all part validation precedes native send; confirmation survives actual SQLite persistence failure", async () => {
   const f = await fixture();
   try {
-    const target = { account_id: "qq-main", conversation_id: "qq-group" };
+    const target = { account_id: "qq-main", conversation_name: "QQ 群聊 1" };
     await expect(
       f.r.service.call("cfl", "send_message", {
         ...target,
@@ -483,7 +483,7 @@ test("all part validation precedes native send; confirmation survives actual SQL
     ).toBe("<@0123456789abcdef0123456789abcdef>");
     const mx = await f.call("send_message", {
       account_id: "matrix-main",
-      conversation_id: "matrix-room",
+      conversation_name: "Matrix 群聊 3",
       request_id: "mx-mention",
       content: [{ type: "mention", native_user_id: "@owner:fixture" }],
     });
@@ -581,7 +581,7 @@ test("Matrix private sender admission and media-only wake use real sync; native 
       (
         await f.r.service.call("cfl", "read_messages", {
           account_id: "matrix-main",
-          conversation_id: "matrix-dm",
+          conversation_name: "Matrix 私聊 4",
         })
       ).items,
     ).toEqual([]);

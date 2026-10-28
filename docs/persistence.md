@@ -39,8 +39,12 @@ The explicit offline `connections-convert` command is the sole bounded conversio
 of old standalone TOML receiver ownership; it does not change the SQL schema/version.
 Its Store open authenticates key/lease but skips runtime initialization, including
 NULL-send reconciliation and assets-directory creation. See operator instructions.
-Conversation display labels reuse `conversations.name`; they do not participate in
-identity pins or admission. Consumer connections live only in TOML, with one sealed
+Conversation names reuse `conversations.name`; every nonempty existing value is
+retained until explicitly changed in settings, even if it resembles an ID. Later
+platform metadata cannot overwrite it. A new conversation may use its first usable
+incoming name; otherwise an empty name is initialized when encountered with a stable
+generated label derived from the row sequence. No new columns or state migration are
+needed. Names do not participate in identity pins or admission. Consumer connections live only in TOML, with one sealed
 receiver credential per agent. Binding account associations do not grant chat access.
 
 The existing separate private administrator record also retains up to32 browser
@@ -52,14 +56,16 @@ discarding its sessions. This uses neither SQLite schema changes nor platform,
 master-key or agent-token authority. Raw browser session tokens are never persisted.
 
 Name-selected send requests use the existing sends.input column for an accepted envelope:
-immutable canonical caller JSON plus resolved account/conversation IDs. ID-selected
-requests retain the original flat canonical JSON and key order, so previously accepted
-ID requests still reconcile. This adds no SQL schema, migration, alias or configuration
-format. Known requests recheck local pinned grants before returning stored/unknown
-results; renames never redirect them. Reservation remains atomic before native I/O.
+immutable canonical caller JSON plus resolved account/conversation IDs. Previously accepted
+ID-selected rows retain their original flat input or named-mention envelope. A new
+name-based reconciliation resolves the current name to the same pinned identity and
+compares original content and reply target; no old ID selector is exposed and no native
+resend occurs. Known named requests recheck pinned grants and reconcile their exact caller
+input across rename. This adds no SQL schema, migration, alias or configuration format.
+Reservation remains atomic before native I/O.
 
 Optional capture-time Message.conversation.name lives only in the original messages.body
-and deliveries.body JSON. It uses existing retained conversation metadata (fresh QQ
-contact metadata on that observation), introduces no column/version/migration/cache,
+and deliveries.body JSON. New snapshots carry the current effective conversation name,
+including an honest generated fallback when needed; this introduces no column/version/migration/cache,
 and is never backfilled or rewritten on metadata refresh/rename. Old absent-name
 snapshots stay byte-identical across restart and deduplication.

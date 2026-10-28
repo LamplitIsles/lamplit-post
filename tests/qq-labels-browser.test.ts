@@ -88,14 +88,21 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         group_id: "label-group",
         group_openid: "label-group",
       });
+      await until(
+        () =>
+          !!f.app.store.db
+            .prepare("SELECT id FROM conversations WHERE native=?")
+            .get("label-group"),
+      );
       f.platform.sendQQ("C2C_MESSAGE_CREATE", "owned named peer", {
         group_id: undefined,
         group_openid: undefined,
         author: { id: "label-peer", username: "Owned QQ peer" },
       });
-      f.platform.sendQQ("GROUP_AT_MESSAGE_CREATE", "owned unavailable name", {
-        group_id: "label-unknown",
-        group_openid: "label-unknown",
+      f.platform.sendQQ("C2C_MESSAGE_CREATE", "owned unavailable name", {
+        group_id: undefined,
+        group_openid: undefined,
+        author: { id: "label-unknown" },
       });
       await until(
         () =>
@@ -104,9 +111,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
             .get()!.n === 3,
       );
       expect(f.receiver.attempts).toEqual([]);
-      expect(f.platform.calls.some((c) => c.path.endsWith("/info"))).toBe(
-        false,
-      );
+      expect(f.platform.calls.some((c) => c.path.endsWith("/info"))).toBe(true);
       const observed = f.app.store.db
         .prepare(
           "SELECT id FROM conversations WHERE account='qq-main' AND native='label-peer'",
@@ -116,7 +121,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         (
           await tool("get_conversation", {
             account_id: "qq-main",
-            conversation_id: observed.id,
+            conversation_name: "Owned QQ peer",
           })
         ).structuredContent.error.code,
       ).toBe("not_found");
@@ -130,6 +135,13 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         "open",
         f.config.settings.origin,
       );
+      if (process.env.POST_BROWSER_WIDTH)
+        await browser(
+          "set",
+          "viewport",
+          process.env.POST_BROWSER_WIDTH,
+          process.env.POST_BROWSER_HEIGHT ?? "900",
+        );
       await browser("fill", "#password", "owned-fixture-password");
       await click("登录");
       await wait("!!document.querySelector('.bindings')");
@@ -138,6 +150,11 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       await click("下一步");
       await click("读取可用聊天 / 重试");
       await wait("document.querySelectorAll('.chat-label').length>=3");
+      const anonymous = f.app.store.db
+        .prepare("SELECT id,seq FROM conversations WHERE native=?")
+        .get("label-unknown")!;
+      const groupName = "Owned QQ group";
+      const fallback = `QQ 私聊 ${anonymous.seq}`;
       await browser("fill", "#search", "label-");
       const labels = await evaluate(
         "Array.from(document.querySelectorAll('label.chat-label')).map(e=>e.innerText)",
@@ -147,7 +164,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         .toContain("群聊");
       expect
         .soft(labels.find((s: string) => s.includes("label-group")))
-        .toContain("Owned QQ group");
+        .toContain(groupName);
       expect
         .soft(labels.find((s: string) => s.includes("label-peer")))
         .toContain("私聊");
@@ -156,19 +173,25 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         .toContain("Owned QQ peer");
       expect
         .soft(labels.find((s: string) => s.includes("label-unknown")))
-        .toContain("名称不可用");
+        .toContain(fallback);
       await shot("qq-candidates");
-      for (let i = 0; i < 3; i++)
-        await browser(
-          "find",
-          "nth",
-          String(i),
-          "[role=checkbox]:not([disabled])",
-          "click",
-        );
+      for (const native of ["label-group", "label-peer", "label-unknown"]) {
+        const row = f.app.store.db
+          .prepare("SELECT id FROM conversations WHERE native=?")
+          .get(native)!;
+        const selector = "#candidate-" + row.id;
+        await browser("scrollintoview", selector);
+        await browser("click", selector);
+      }
       expect(
         await evaluate("document.querySelector('.editor-body').innerText"),
       ).toContain("Owned QQ peer");
+      await browser(
+        "fill",
+        "#chat-name-" + anonymous.id,
+        "Owned unnamed contact",
+      );
+      await browser("scrollintoview", "#chat-name-" + anonymous.id);
       await shot("qq-selected");
       // Explicit selection + final Save grants only this observed QQ contact.
       expect(
@@ -179,9 +202,9 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       const review = await evaluate(
         "document.querySelector('[role=dialog] dd').innerText",
       );
-      expect(review).toContain("Owned QQ group");
+      expect(review).toContain(groupName);
       expect(review).toContain("私聊");
-      expect(review).toContain("名称不可用");
+      expect(review).toContain("Owned unnamed contact");
       await shot("qq-review");
       await click("保存并应用");
       await wait("!document.querySelector('[role=dialog]')");
@@ -193,11 +216,11 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       const detail = await evaluate(
         "Array.from(document.querySelectorAll('.binding-details')).at(-1).innerText",
       );
-      expect(detail).toContain("Owned QQ group");
+      expect(detail).toContain(groupName);
       expect(detail).toContain("Owned QQ peer");
       expect(detail).toContain("群聊");
       expect(detail).toContain("私聊");
-      expect(detail).toContain("名称不可用");
+      expect(detail).toContain("Owned unnamed contact");
       await shot("qq-saved-details");
       const after = await f.app.view();
       expect(
@@ -205,16 +228,16 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
           .senders,
       ).toEqual(["label-peer"]);
       for (const [native, type, name] of [
-        ["label-group", "group", "Owned QQ group"],
+        ["label-group", "group", groupName],
         ["label-peer", "direct", "Owned QQ peer"],
-        ["label-unknown", "group", undefined],
+        ["label-unknown", "direct", "Owned unnamed contact"],
       ] as const) {
         const scope = after.bindings[1]!.scopes.find(
           (s) => s.native_id === native,
         )!;
         const result = await tool("get_conversation", {
           account_id: "qq-main",
-          conversation_id: scope.conversation_id,
+          conversation_name: name,
         });
         expect(result.isError).not.toBe(true);
         expect(result.structuredContent.type).toBe(type);
@@ -231,13 +254,33 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         })),
       ).toEqual(
         expect.arrayContaining([
-          { native: "label-group", type: "group", name: "Owned QQ group" },
+          { native: "label-group", type: "group", name: groupName },
           { native: "label-peer", type: "direct", name: "Owned QQ peer" },
-          { native: "label-unknown", type: "group", name: undefined },
+          {
+            native: "label-unknown",
+            type: "direct",
+            name: "Owned unnamed contact",
+          },
         ]),
       );
       expect(f.receiver.attempts).toEqual([]);
       expect(f.platform.sendCount).toBe(0);
+      f.platform.sendQQ("C2C_MESSAGE_CREATE", "later nickname", {
+        group_id: undefined,
+        group_openid: undefined,
+        author: { id: "label-unknown", username: "Later platform name" },
+      });
+      await until(
+        () =>
+          f.app.store.db
+            .prepare("SELECT count(*) n FROM messages WHERE conversation=?")
+            .get(anonymous.id)!.n === 2,
+      );
+      expect(
+        (await f.app.view()).bindings[1]!.scopes.find(
+          (s) => s.conversation_id === anonymous.id,
+        )!.name,
+      ).toBe("Owned unnamed contact");
     } finally {
       await browser("close").catch(() => {});
       await f.close();

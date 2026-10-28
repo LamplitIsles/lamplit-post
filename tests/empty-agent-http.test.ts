@@ -94,13 +94,13 @@ test("registered zero-binding identity lists zero accounts over actual MCP witho
       ["list_conversations", { account_id: "ungranted" }],
       [
         "read_messages",
-        { account_id: "ungranted", conversation_id: "ungranted" },
+        { account_id: "ungranted", conversation_name: "ungranted" },
       ],
       [
         "send_message",
         {
           account_id: "ungranted",
-          conversation_id: "ungranted",
+          conversation_name: "ungranted",
           request_id: "must-not-send",
           content: [{ type: "text", text: "denied" }],
         },

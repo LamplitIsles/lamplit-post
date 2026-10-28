@@ -209,7 +209,7 @@ test("settings rejects sharing, orphaning and retained ownership transfer atomic
       (
         await call(otherToken, "read_messages", {
           account_id: "qq-main",
-          conversation_id: "qq-group",
+          conversation_name: "QQ 群聊 1",
         })
       ).error.code,
     ).toBe("not_found");
@@ -234,7 +234,7 @@ test("settings rejects sharing, orphaning and retained ownership transfer atomic
         (
           await call(otherToken, "get_conversation", {
             account_id: "qq-main",
-            conversation_id: "qq-group",
+            conversation_name: "QQ 群聊 1",
           })
         ).error?.code,
       )
@@ -257,7 +257,7 @@ test("settings rejects sharing, orphaning and retained ownership transfer atomic
       (
         await call(otherToken, "send_message", {
           account_id: "qq-main",
-          conversation_id: "qq-group",
+          conversation_name: "QQ 群聊 1",
           request_id: "foreign",
           content: [{ type: "text", text: "must not send" }],
         })

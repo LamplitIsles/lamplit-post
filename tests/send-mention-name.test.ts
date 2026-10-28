@@ -6,6 +6,7 @@ import { Content, ToolInputs } from "../contracts/v1/index";
 
 test("public named mentions resolve only selected-chat observed QQ speakers or Matrix joined members and pin retries", async () => {
   const f = await settingsFixture();
+  let groupName = "QQ 群聊 1";
   let reopened: Awaited<ReturnType<typeof start>> | undefined;
   let endpoint = () => f.app.app.http!.url;
   const send = async (
@@ -29,7 +30,7 @@ test("public named mentions resolve only selected-chat observed QQ speakers or M
           name: "send_message",
           arguments: {
             account_id: "qq-main",
-            conversation_id: "qq-group",
+            conversation_name: groupName,
             ...target,
             request_id,
             content: content ?? [{ type: "mention", name }],
@@ -75,8 +76,7 @@ test("public named mentions resolve only selected-chat observed QQ speakers or M
     expect(
       (
         await send("both-names", "Alice", {
-          conversation_id: undefined,
-          conversation_name: "Observed group",
+          conversation_name: groupName,
         })
       ).status,
     ).toBe("sent");
@@ -132,13 +132,16 @@ test("public named mentions resolve only selected-chat observed QQ speakers or M
     ]);
     expect
       .soft(
-        (await send("direct-denied", "Alice", { conversation_id: "qq-dm" }))
-          .error?.code,
+        (
+          await send("direct-denied", "Alice", {
+            conversation_name: "QQ 私聊 2",
+          })
+        ).error?.code,
       )
       .toBe("invalid_request");
     const matrix = {
       account_id: "matrix-main",
-      conversation_id: "matrix-room",
+      conversation_name: "Matrix 群聊 3",
     };
     expect.soft((await send("mx-exact", "Owner", matrix)).status).toBe("sent");
     expect
@@ -200,14 +203,12 @@ test("public named mentions resolve only selected-chat observed QQ speakers or M
     f.app.store.db
       .prepare("INSERT INTO sends(agent,request,input,result) VALUES(?,?,?,?)")
       .run("cfl", "legacy-mention", legacy, JSON.stringify(legacyResult));
-    expect(
-      JSON.stringify(ToolInputs.send_message.parse(JSON.parse(legacy))),
-    ).toBe(legacy);
-    const nativeResult = await f.app.app.service!.call(
-      "cfl",
-      "send_message",
-      JSON.parse(legacy),
-    );
+    const nativeResult = await f.app.app.service!.call("cfl", "send_message", {
+      account_id: "qq-main",
+      conversation_name: groupName,
+      request_id: "legacy-mention",
+      content: [{ type: "mention", native_user_id: alice }],
+    });
     expect(nativeResult).toEqual(legacyResult);
     f.app.store.db
       .prepare("UPDATE sends SET result=NULL WHERE request='concurrent'")
@@ -224,31 +225,46 @@ test("public named mentions resolve only selected-chat observed QQ speakers or M
     endpoint = () => reopened!.http!.url;
     const callsBefore = f.platform.calls.length;
     const sendsBefore = f.platform.sendCount;
-    expect.soft((await send("qq-exact", "Alice")).status).toBe("sent");
+    expect
+      .soft(
+        (await send("qq-exact", "Alice", { conversation_name: "QQ 群聊 1" }))
+          .status,
+      )
+      .toBe("sent");
     expect.soft((await send("unknown", "Alice")).status).toBe("unknown");
     expect((await send("concurrent", "Alice")).status).toBe("unknown");
     expect((await send("mx-exact", "Owner", matrix)).status).toBe("sent");
     expect
-      .soft((await send("qq-exact", "Renamed")).error?.code)
+      .soft(
+        (await send("qq-exact", "Renamed", { conversation_name: "QQ 群聊 1" }))
+          .error?.code,
+      )
       .toBe("conflict");
     expect(f.platform.sendCount).toBe(sendsBefore);
     expect(
       f.platform.calls
         .slice(callsBefore)
-        .every((c) => c.path.endsWith("/sync")),
+        .every((c) =>
+          ["/sync", "/joined_rooms", "/state"].some((suffix) =>
+            c.path.endsWith(suffix),
+          ),
+        ),
     ).toBe(true);
     reopened.service.config.bindings[0]!.scopes =
       reopened.service.config.bindings[0]!.scopes.filter(
         (s) => s.conversation_id !== "qq-group",
       );
-    expect((await send("qq-exact", "Alice")).error.code).toBe("not_found");
+    expect(
+      (await send("qq-exact", "Alice", { conversation_name: "QQ 群聊 1" }))
+        .error.code,
+    ).toBe("not_found");
     expect(f.platform.sendCount).toBe(sendsBefore);
     expect(Content.safeParse({ type: "mention", name: "Alice" }).success).toBe(
       false,
     );
     const base = {
       account_id: "qq-main",
-      conversation_id: "qq-group",
+      conversation_name: "QQ 群聊 1",
       request_id: "invalid",
     };
     expect(

@@ -28,7 +28,7 @@ test("real Node Satori QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", 
       name: "read_messages",
       arguments: {
         account_id: "qq-main",
-        conversation_id: "qq-group",
+        conversation_name: "QQ 群聊 1",
         limit: 101,
       },
     });
@@ -50,7 +50,7 @@ test("real Node Satori QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", 
     );
     const history = await client.callTool({
       name: "read_messages",
-      arguments: { account_id: "qq-main", conversation_id: "qq-group" },
+      arguments: { account_id: "qq-main", conversation_name: "QQ 群聊 1" },
     });
     expect((history.structuredContent as any).items.length).toBe(2);
     await until(
@@ -64,7 +64,7 @@ test("real Node Satori QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", 
       name: "send_message",
       arguments: {
         account_id: "qq-main",
-        conversation_id: "qq-group",
+        conversation_name: "QQ 群聊 1",
         request_id: "r1",
         content: [{ type: "text", text: "outgoing" }],
       },
@@ -74,7 +74,7 @@ test("real Node Satori QQ WS + Matrix SDK sync, HTTP MCP and durable receiver", 
       name: "send_message",
       arguments: {
         account_id: "matrix-main",
-        conversation_id: "matrix-room",
+        conversation_name: "Matrix 群聊 3",
         request_id: "r2",
         content: [{ type: "text", text: "matrix outgoing" }],
       },

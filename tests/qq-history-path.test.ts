@@ -27,7 +27,7 @@ test("authorized QQ history retains ordinary events before and after @ independe
     expect(response.status).toBe(200);
     return (await response.json()).result;
   };
-  const target = { account_id: "qq-main", conversation_id: "qq-group" };
+  const target = { account_id: "qq-main", conversation_name: "QQ 群聊 1" };
   const read = async (extra = {}) => {
     const r = await tool("read_messages", { ...target, ...extra });
     expect(r.isError).not.toBe(true);
@@ -85,14 +85,19 @@ test("authorized QQ history retains ordinary events before and after @ independe
     const listing = await tool("list_conversations", { account_id: "qq-main" });
     expect(listing.structuredContent.items).toContainEqual(
       expect.objectContaining({
-        ...target,
+        account_id: "qq-main",
+        name: target.conversation_name,
         type: "group",
         native_id: "qq-group",
       }),
     );
     expect(
       (await tool("get_conversation", target)).structuredContent,
-    ).toMatchObject({ ...target, type: "group" });
+    ).toMatchObject({
+      account_id: "qq-main",
+      name: target.conversation_name,
+      type: "group",
+    });
     await until(() => f.receiver.attempts.length === 1);
     expect(JSON.parse(f.receiver.attempts[0]!).message.native_message_id).toBe(
       "at-event",
