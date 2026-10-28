@@ -136,7 +136,8 @@ for (const mode of ["new-selection", "old-empty", "old-mismatched"] as const)
           await click("编辑绑定");
         }
         await click("qq-main qq · qq-app 已连接");
-        await click("下一步");
+        await click("保存并连接");
+        await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
         await click("读取可用聊天 / 重试");
         await wait("document.querySelectorAll('label.chat-label').length>=1");
         if (mode === "new-selection")
@@ -195,8 +196,6 @@ for (const mode of ["new-selection", "old-empty", "old-mismatched"] as const)
               ],
             })),
           );
-        const before = await readFile(f.path, "utf8");
-        const beforeBindings = (await f.app.view()).bindings;
         await browser(
           "--allowed-domains",
           "127.0.0.1",
@@ -217,6 +216,8 @@ for (const mode of ["new-selection", "old-empty", "old-mismatched"] as const)
           expect(f.receiver.attempts).toHaveLength(0);
         }
         await openContact();
+        const before = await readFile(f.path, "utf8");
+        const beforeBindings = (await f.app.view()).bindings;
         expect(
           await browser(
             "eval",
@@ -228,7 +229,7 @@ for (const mode of ["new-selection", "old-empty", "old-mismatched"] as const)
           "Array.from(document.querySelectorAll('.editor-body .hint')).find(e=>e.textContent.includes('保存后仅授权此私聊')).scrollIntoView({block:'center'})",
         );
         await shot("draft-before-cancel");
-        await click("取消");
+        await click("稍后完成");
         await wait("!document.querySelector('[data-slot=dialog-overlay]')");
         expect(await readFile(f.path, "utf8")).toBe(before);
         expect((await f.app.view()).bindings).toEqual(beforeBindings);
@@ -238,7 +239,7 @@ for (const mode of ["new-selection", "old-empty", "old-mismatched"] as const)
         await click("下一步");
         if (mode === "new-selection") await browser("click", "#wake-direct");
         await click("下一步");
-        await click("保存并应用");
+        await click("保存聊天授权");
         await wait("!document.querySelector('[role=dialog]')");
         await browser("reload");
         await wait("!!document.querySelector('.bindings')");
@@ -278,7 +279,7 @@ for (const mode of ["new-selection", "old-empty", "old-mismatched"] as const)
               name: "read_messages",
               arguments: {
                 account_id: "qq-main",
-                conversation_id: scope.conversation_id,
+                conversation_name: scope.name,
               },
             },
           }),

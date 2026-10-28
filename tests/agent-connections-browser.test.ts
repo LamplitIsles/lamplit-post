@@ -109,9 +109,11 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
           "!document.querySelector('#receiver-secret') && !document.querySelector('#receiver')",
         ),
       ).toBe(true);
-      await click("验证并读取房间");
+      await click("验证账号");
       await wait("document.body.textContent.includes('账号已验证')");
-      await click("下一步");
+      await click("保存并连接");
+      await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
+      await click("读取可用聊天 / 重试");
       const candidate = await evaluate(
         "document.querySelector('.chat-label')?.textContent",
       );
@@ -132,10 +134,10 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       await click("下一步");
       expect(
         await evaluate(
-          "document.querySelector('dd').textContent.includes('Owned fixture room')",
+          "document.querySelector('[role=dialog] dd').textContent.includes('Owned fixture room')",
         ),
       ).toBe(true);
-      await click("保存并应用");
+      await click("保存聊天授权");
       await wait("!document.querySelector('[role=dialog]')");
       await click("＋ 绑定账号");
       await click("＋ 新建账号");
@@ -143,15 +145,16 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       await click("手动输入 App ID / AppSecret（高级）");
       await fill("native", "qq-app");
       await fill("credential", "test-qq-platform-secret");
-      await click("下一步");
+      await click("保存并连接");
+      await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
       expect(
         await evaluate(
-          "document.querySelector('[role=dialog]').textContent.includes('先保存')",
+          "document.querySelector('[role=dialog]').textContent.includes('账号已连接')",
         ),
       ).toBe(true);
       await click("下一步");
       await click("下一步");
-      await click("保存并应用");
+      await click("保存聊天授权");
       await wait("!document.querySelector('[role=dialog]')");
       await browser(["reload"]);
       await wait("document.querySelectorAll('.binding').length===2");
@@ -179,7 +182,8 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         "document.querySelectorAll('.binding')[1].querySelector('button').click()",
       );
       await wait("!!document.querySelector('[role=dialog]')");
-      await click("下一步");
+      await click("保存并连接");
+      await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
       await click("读取可用聊天 / 重试");
       await wait(
         "document.querySelector('[role=dialog]').textContent.includes('本机尚无候选聊天')",
@@ -296,7 +300,9 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         );
         await wait("!!document.querySelector('[role=dialog]')");
         await bounds();
-        await click("下一步");
+        await click("保存并连接");
+        await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
+        await click("读取可用聊天 / 重试");
         await bounds();
         expect(
           await evaluate(
@@ -367,6 +373,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         senders: [],
       });
       const beforeRefresh = await f.app.view();
+      const priorName = beforeRefresh.bindings[0]!.scopes[0]!.name;
       expect(
         (
           await f.apply("settings", {
@@ -390,20 +397,22 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         "document.querySelector('.binding-details').open=true;document.querySelector('.binding').querySelector('button').click()",
       );
       await wait("!!document.querySelector('[role=dialog]')");
-      await click("验证并读取房间");
+      await click("验证账号");
       await wait(
         "document.querySelector('[role=dialog]').textContent.includes('账号已验证')",
       );
-      await click("下一步");
+      await click("保存并连接");
+      await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
+      await click("读取可用聊天 / 重试");
       expect(
         await evaluate(
-          "document.querySelector('.chat-label').textContent.includes('<b>显示名称</b>') && !document.querySelector('.chat-label b')",
+          `document.querySelector('.chat-label').textContent.includes(${JSON.stringify(priorName)}) && !document.querySelector('.chat-label b')`,
         ),
       ).toBe(true);
       expect
         .soft(
           await evaluate(
-            "document.querySelector('h3 + .chat-row .chat-label').textContent.includes('<b>显示名称</b>')",
+            `document.querySelector('h3 + .chat-row .chat-label').textContent.includes(${JSON.stringify(priorName)})`,
           ),
         )
         .toBe(true);
@@ -413,16 +422,16 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       expect
         .soft(
           await evaluate(
-            "document.querySelector('[role=dialog] dd').textContent.includes('<b>显示名称</b>')",
+            `document.querySelector('[role=dialog] dd').textContent.includes(${JSON.stringify(priorName)})`,
           ),
         )
         .toBe(true);
-      await click("保存并应用");
+      await click("保存聊天授权");
       await wait("!document.querySelector('[role=dialog]')");
       await browser(["reload"]);
       await wait("document.querySelectorAll('.account-identity').length===2");
       const refreshed = (await f.app.view()).bindings[0]!;
-      expect.soft(refreshed.scopes[0]!.name).toBe(newName.slice(0, 256));
+      expect.soft(refreshed.scopes[0]!.name).toBe(priorName);
       expect(refreshed.scopes.map(({ name, ...scope }) => scope)).toEqual(
         permissions,
       );

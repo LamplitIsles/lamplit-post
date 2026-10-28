@@ -126,14 +126,8 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         { appId: "qq-app", appSecret: "owned-retry-browser-credential" },
       ]);
       await wait("document.body.textContent.includes('已授权机器人')");
-      await click("下一步");
-      await browser(["click", "details:has(#manual) > summary"]);
-      await fill("manual", "qq-group");
-      await click("添加到草稿");
-      await click("下一步");
-      await click("下一步");
       f.platform.tokenStall(true);
-      await click("保存并应用");
+      await click("保存并连接");
       await wait("document.body.textContent.includes('已保留账号和聊天草稿')");
       expect(f.app.status().state).toBe("failed_recovered");
       expect(
@@ -143,10 +137,9 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       ).toBe(true);
       expect(f.app.config.accounts).toEqual([]);
       f.platform.tokenStall(false);
-      await click("下一步");
-      await click("下一步");
-      await click("下一步");
-      await click("保存并应用");
+      await click("保存并连接");
+      await wait("document.body.textContent.includes('账号已连接。查找聊天')");
+      await click("稍后完成");
       await wait("!document.querySelector('[role=dialog]')");
       await until(() => !f.app.status().busy);
       expect(f.app.status().applied).toBe(true);

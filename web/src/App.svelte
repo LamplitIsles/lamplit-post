@@ -22,7 +22,9 @@
     notice = $state(""),
     error = $state("");
   let applying = $state(false);
-  let draftSavedVersion = $state("");
+  let draftSavedVersion = $state(""),
+    draftSavePhase = $state(""),
+    saveUnknown = $state(false);
   let verifying = $state(false),
     verified = $state(false),
     verificationKey = $state("");
@@ -69,7 +71,7 @@
         if (!selected.homeserver) reasons.push("填写 Homeserver 地址");
         if (newAccount && !platformSecret) reasons.push("填写 Access token");
         if ((newAccount || platformSecret) && !verified)
-          reasons.push("验证账号并读取房间");
+          reasons.push("先验证账号");
       } else if (
         newAccount &&
         !platformSecret &&
@@ -198,20 +200,25 @@
       ...(input === undefined ? {} : { body: JSON.stringify(input) }),
     }).catch((e) => {
       if (options.signal?.aborted) throw e;
-      throw new Error("连接中断。请先重新读取设置，确认是否已保存，再重试。");
+      throw Object.assign(
+        new Error("连接中断。请先重新读取设置，确认是否已保存，再重试。"),
+        { uncertain: true },
+      );
     });
     if (response.status === 401 && path !== "login") logged = false;
     let data;
     try {
       data = await response.json();
     } catch {
-      throw new Error(
-        `响应不完整（HTTP ${response.status}）。请重新读取设置，确认是否已保存；不要重复提交。`,
+      throw Object.assign(
+        new Error(`响应不完整（HTTP ${response.status}）。请重新读取设置，确认是否已保存；不要重复提交。`),
+        { uncertain: response.ok || response.status >= 500 },
       );
     }
     if (!data || typeof data !== "object" || Array.isArray(data))
-      throw new Error(
-        `响应不完整（HTTP ${response.status}）。请重新读取设置，确认是否已保存；不要重复提交。`,
+      throw Object.assign(
+        new Error(`响应不完整（HTTP ${response.status}）。请重新读取设置，确认是否已保存；不要重复提交。`),
+        { uncertain: response.ok || response.status >= 500 },
       );
     if (!response.ok) {
       if (data.busy)
@@ -219,7 +226,9 @@
           "连接仍在处理，请等待状态更新后重试。此次未接受新设置。",
         );
       if (response.status === 401 && path !== "login") logged = false;
-      throw new Error(explain(data.error, path));
+      throw Object.assign(new Error(explain(data.error, path)), {
+        uncertain: path === "settings" && response.status >= 500,
+      });
     }
     return data;
   }
@@ -289,7 +298,10 @@
         });
       }
     } catch (e) {
-      if (!controller.signal.aborted) error = e.message;
+      if (!controller.signal.aborted) {
+        if (draftSavedVersion) saveUnknown = true;
+        error = e.message;
+      }
     } finally {
       if (pollController === controller) pollController = null;
     }
@@ -317,7 +329,28 @@
     if (!draftSavedVersion) return;
     if (status.accepted_version === draftSavedVersion && status.applied) {
       if (qqDraft) qqDraft = { ...qqDraft, state: "committed" };
-      dismiss();
+      if (draftSavePhase === "account") {
+        const account = state.accounts.find((a) => a.id === selected?.id);
+        const savedBinding = state.bindings.find((b) => b.id === draft?.id);
+        if (!account?.ready || !savedBinding) {
+          saveUnknown = true;
+          error = "账号状态暂时无法确认，请重新读取后检查。";
+          return;
+        }
+        verificationKey = "";
+        selected = copy(cleanAccount(account));
+        draft = copy(savedBinding);
+        aliases = draft.wake.aliases.join(", ");
+        platformSecret = "";
+        newAccount = false;
+        verified = false;
+        candidates = [];
+        directoryState = "idle";
+        discovery = "";
+        draftSavedVersion = "";
+        draftSavePhase = "";
+        step = 1;
+      } else dismiss();
     } else {
       draftSavedVersion = "";
       if (qqDraft?.id) {
@@ -346,7 +379,10 @@
     secrets = [],
     authorization,
     consumers = state.agents,
+    accepted,
   ) {
+    if (saveUnknown)
+      throw new Error("上次保存结果尚未确认。请先读取当前状态。");
     let result;
     try {
       result = await api("settings", {
@@ -372,6 +408,16 @@
       } catch {}
       throw e;
     }
+    if (
+      typeof result.saved !== "boolean" ||
+      (result.saved &&
+        (typeof result.accepted_version !== "string" ||
+          !result.accepted_version))
+    )
+      throw Object.assign(new Error("保存结果不完整，请先读取当前状态。"), {
+        uncertain: true,
+      });
+    if (result.saved && accepted) accepted(result.accepted_version);
     await refresh();
     if (!result.saved)
       throw new Error("尚未保存：旧连接仍在停止或恢复。请等待状态更新后再试。");
@@ -386,6 +432,7 @@
   }
   function begin(binding) {
     draftSavedVersion = "";
+    draftSavePhase = "";
     invalidateVerification();
     void clearQQ();
     manualQQ = false;
@@ -502,9 +549,7 @@
       verificationKey = draftKey();
       candidates = result.items;
       verified = true;
-      discovery = candidates.length
-        ? "账号已验证。请选择房间；加密房间暂不支持。"
-        : "账号已验证，目前没有已加入的房间。";
+      discovery = "账号已验证，可以保存并连接。";
     } catch (e) {
       if (!controller.signal.aborted) error = e.message;
     } finally {
@@ -553,14 +598,7 @@
         qqDraft = result;
         if (result.state === "authorized") {
           selected.native_id = result.native_id;
-          const local = await api(
-            "discover",
-            { account_id: result.account_id, qq_authorization: result.id },
-            { signal: controller.signal },
-          );
-          if (generation !== qqGeneration || controller.signal.aborted) return;
-          normalizeDraftId(result.account_id, local.items);
-          candidates = local.items;
+          normalizeDraftId(result.account_id);
           break;
         }
         if (result.state === "conflict")
@@ -583,7 +621,6 @@
     }
   }
   async function discover() {
-    if (selected.platform === "matrix") return verifyDraft();
     await run(async () => {
       directoryState = "loading";
       let result;
@@ -601,7 +638,12 @@
       candidates = result.items;
       normalizeDraftId(selected.id, candidates);
       directoryState = candidates.length ? "ready" : "empty";
-      discovery = "QQ 仅显示本机已观测或手动配置的聊天，不是完整目录。";
+      discovery =
+        selected.platform === "qq"
+          ? ""
+          : candidates.length
+            ? "已读取聊天候选；加密房间暂不支持。"
+            : "没有可用房间，可以稍后重试。";
     });
   }
   function toggle(c, checked) {
@@ -662,7 +704,92 @@
     manual = "";
     peers = "";
   }
+  async function inspectSave() {
+    await run(async () => {
+      const status = await api("status");
+      await refresh();
+      if (status.busy === true) {
+        error = "连接仍在处理，请稍后重新读取。";
+        return;
+      }
+      if (
+        status.busy !== false ||
+        typeof status.applied !== "boolean" ||
+        typeof status.state !== "string" ||
+        typeof status.current_version !== "string" ||
+        status.current_version !== state.version
+      ) {
+        error = "当前状态尚无法确认，请稍后重新读取。";
+        return;
+      }
+      if (draftSavedVersion) {
+        saveUnknown = false;
+        await finishDraft(status);
+      } else {
+        saveUnknown = false;
+        if (open) dismiss();
+        notice = "已读取当前状态。请检查账号和授权后再决定下一步。";
+      }
+    });
+  }
+  async function saveAccount() {
+    const existing = state.accounts.find((a) => a.id === selected.id);
+    const priorBinding = state.bindings.find((b) => b.id === draft.id);
+    if (
+      existing?.ready &&
+      bindings.some((b) => b.account_ids.includes(selected.id)) &&
+      !platformSecret &&
+      JSON.stringify(cleanAccount(existing)) ===
+        JSON.stringify(cleanAccount(selected))
+    ) {
+      step = 1;
+      return;
+    }
+    await run(async () => {
+      const accounts = existing
+        ? state.accounts.map((a) => (a.id === selected.id ? selected : a))
+        : [...state.accounts, selected];
+      const accountBinding = priorBinding
+        ? copy(priorBinding)
+        : { ...copy(draft), scopes: [] };
+      accountBinding.account_ids = [
+        ...new Set([...accountBinding.account_ids, selected.id]),
+      ];
+      const bindings = priorBinding
+        ? state.bindings.map((b) => (b.id === draft.id ? accountBinding : b))
+        : [...state.bindings, accountBinding];
+      const secrets = platformSecret
+        ? [{
+            ref: selected.credential,
+            account: selected.id,
+            kind: "platform",
+            value: platformSecret,
+          }]
+        : [];
+      try {
+        await save(
+          accounts,
+          bindings,
+          secrets,
+          qqDraft?.state === "authorized"
+            ? { id: qqDraft.id, account_id: selected.id }
+            : undefined,
+          state.agents,
+          (version) => {
+            draftSavePhase = "account";
+            draftSavedVersion = version;
+          },
+        );
+        if (!state.busy) await finishDraft(state);
+      } catch (e) {
+        if (e.uncertain || draftSavedVersion) saveUnknown = true;
+        throw e;
+      }
+    });
+  }
   async function next() {
+    if (saveUnknown) return;
+    if (step === 0) return saveAccount();
     if (step < 3) {
       step++;
       return;
@@ -697,20 +824,21 @@
           kind: "platform",
           value: platformSecret,
         });
-      const result = await save(
-        accounts,
-        updated,
-        secrets,
-        qqDraft?.state === "authorized"
-          ? { id: qqDraft.id, account_id: selected.id }
-          : undefined,
-      );
-      draftSavedVersion = result.accepted_version;
-      if (!state.busy) await finishDraft(state);
+      try {
+        await save(accounts, updated, secrets, undefined, state.agents, (version) => {
+          draftSavePhase = "grants";
+          draftSavedVersion = version;
+        });
+        if (!state.busy) await finishDraft(state);
+      } catch (e) {
+        if (e.uncertain || draftSavedVersion) saveUnknown = true;
+        throw e;
+      }
     });
   }
   function dismiss() {
     draftSavedVersion = "";
+    draftSavePhase = "";
     invalidateVerification();
     void clearQQ();
     open = false;
@@ -844,6 +972,10 @@
             disabled={busy}
             onclick={() => run(refresh)}>重新读取</Button
           >
+        </div>{/if}
+      {#if saveUnknown}<div class="notice" role="alert">
+          上次保存的结果尚未确认。请先读取当前状态，再修改设置。
+          <Button variant="outline" disabled={busy} onclick={inspectSave}>读取当前状态</Button>
         </div>{/if}
       {#if notice}<div class="notice" role="status">{notice}</div>{/if}
       {#if error && !state.version}<section class="empty">
@@ -1039,6 +1171,7 @@
   onOpenChange={(value) => {
     if (!value) {
       draftSavedVersion = "";
+      draftSavePhase = "";
       invalidateVerification();
       void clearQQ();
       platformSecret = "";
@@ -1047,19 +1180,21 @@
   ><Dialog.Content class="binding-dialog" showCloseButton={false}
     ><Dialog.Header
       ><Dialog.Title
-        >{["选择 IM 账号", "选择聊天范围", "设置唤醒方式", "确认绑定"][
+        >{["连接账号", "查找聊天", "授权聊天", "确认授权"][
           step
         ]}</Dialog.Title
       ><Dialog.Description
         >{draftSavedVersion
           ? "设置已保存，正在连接。关闭不会撤销此次保存。"
-          : `为 ${agent} 设置 · 取消不会修改已保存规则`}</Dialog.Description
+          : step > 0
+            ? "账号已保存。聊天授权需另行保存；离开不会撤销账号。"
+            : `为 ${agent} 连接账号 · 已有聊天授权保持不变`}</Dialog.Description
       ></Dialog.Header
     >
     <ol class="stepper" aria-label="绑定步骤">
-      {#each ["账号", "聊天范围", "唤醒", "确认"] as title, i}<li
-          class:current={step === i}
-          aria-current={step === i ? "step" : undefined}
+      {#each ["连接账号", "查找聊天", "授权聊天"] as title, i}<li
+          class:current={Math.min(step, 2) === i}
+          aria-current={Math.min(step, 2) === i ? "step" : undefined}
         >
           {i + 1}
           {title}
@@ -1067,7 +1202,7 @@
     </ol>
     {#if draft}<div class="editor-body">
         {#if step === 0}<p class="hint">
-            此 agent 独立使用账号。保存账号后，再为它授权聊天。
+            先保存并连接账号，再查找和授权聊天。账号只供此 agent 使用。
           </p>
           {#each ownedAccounts as a}<button
               class="account-choice"
@@ -1192,19 +1327,19 @@
                     !selected.homeserver ||
                     (newAccount && !platformSecret)}
                   onclick={verifyDraft}
-                  >{verifying ? "正在验证…" : "验证并读取房间"}</Button
+                  >{verifying ? "正在验证…" : "验证账号"}</Button
                 >
                 <p role="status">
                   {verified
                     ? discovery
                     : verifying
                       ? "正在检查账号和房间…"
-                      : "先验证账号，再选择可访问的房间。"}
+                      : "先验证账号，连接后再查找房间。"}
                 </p>
               </div>{/if}
           {/if}
         {:else if step === 1}<p class="hint">
-            决定该 agent 可以读取和发送消息的位置；聊天范围不是执行会话。
+            账号已连接。查找聊天并选择要授权给此 agent 的范围。
           </p>
           <div class="actions">
             <Button
@@ -1217,20 +1352,16 @@
               onclick={discover}>读取可用聊天 / 重试</Button
             >
           </div>
+          {#if directoryState === "loading"}<p role="status">正在读取聊天…</p>{/if}
           <small
-            >{newAccount && selected.platform === "qq"
-              ? "请先保存账号连接，再从群内 @ 机器人以发现聊天。当前授权草稿尚不能接收消息。"
-              : discovery ||
-                "候选来自平台返回、本机已观测或手动配置，不会自动授权。"}</small
+            >{discovery || "发现聊天不会自动授权。暂时找不到时可以稍后再来。"}</small
           >
           {#if selected.platform === "qq"}<p class="hint">
-              这里搜索本机已观测 / 已配置的聊天，不是 QQ
-              群完整目录。先保存并连接机器人，将它添加到群后在群里 @
-              它，再读取聊天并明确选择授权。群标识是此 App 的
-              openid，不是公开群号。
+              请先给机器人发私聊消息，或将它添加到群后在群里 @ 它，再读取聊天。
+              列表只包含 Post 已观测或已配置的聊天。
             </p>
             {#if directoryState === "empty"}<p role="status">
-                本机尚无候选聊天。保存连接后，按上述步骤发现聊天；收到消息不会自动授权或唤醒。
+                本机尚无候选聊天。按上述步骤发消息后重试；收到消息不会自动授权或唤醒。
               </p>
             {:else if directoryState === "failed"}<p role="status">
                 读取候选失败，尚不能确认本机列表。请检查账号连接后重试。
@@ -1373,19 +1504,24 @@
               })}
             </dd>
             <dt>生效方式</dt>
-            <dd>先保存，再显示连接结果。连接失败时尝试恢复原设置。</dd>
+            <dd>保存后，选中的聊天才会获得授权。</dd>
           </dl>
           <p class="callout">
             账号仅供此 agent 使用。未选聊天不会获得访问权。
           </p>{/if}
         {#if error}<p role="alert">{error}</p>{/if}
+        {#if saveUnknown}<Button
+            variant="outline"
+            disabled={busy}
+            onclick={inspectSave}>读取当前状态</Button
+          >{/if}
       </div>
       {#if missing.length}<p id="next-reason" class="hint" role="status">
           还需：{missing.join("；")}。
         </p>{/if}
       <Dialog.Footer class="editor-footer"
         ><Button variant="ghost" disabled={busy || applying} onclick={dismiss}
-          >取消</Button
+          >{step > 0 ? "稍后完成" : "取消"}</Button
         >
         <div class="actions">
           {#if step > 0}<Button
@@ -1397,15 +1533,21 @@
             >{/if}<Button
             id="next"
             aria-describedby="next-reason"
-            disabled={busy || applying || verifying || missing.length > 0}
+            disabled={busy ||
+              applying ||
+              verifying ||
+              saveUnknown ||
+              missing.length > 0}
             onclick={next}
             >{draftSavedVersion
               ? "已保存，正在连接…"
               : busy
-                ? "正在保存…"
-                : step === 3
-                  ? "保存并应用"
-                  : "下一步"}</Button
+                ? directoryState === "loading" ? "正在读取聊天…" : "正在保存…"
+                : step === 0
+                  ? "保存并连接"
+                  : step === 3
+                    ? "保存聊天授权"
+                    : "下一步"}</Button
           >
         </div></Dialog.Footer
       >{/if}</Dialog.Content

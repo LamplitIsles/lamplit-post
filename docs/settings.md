@@ -62,8 +62,9 @@ bindings still deny machine HTTP access. The browser session does not authorize
 machine MCP/assets, and an agent Bearer cannot administer Post.
 
 Choose one of this agent's accounts or add its own account. QQ's primary path is **扫码连接 QQ**:
-scan the provider authorization QR in mobile QQ, then explicitly confirm the account,
-chat grants and save. The connector supplies App ID/AppSecret to Post in server memory;
+scan the provider authorization QR in mobile QQ, then explicitly save the account
+and wait for its connection. Find chats and save their grants separately. The
+connector supplies App ID/AppSecret to Post in server memory;
 only the QR/status/App ID reach the browser. This is credential authorization, distinct
 from the secondary configured-bot share QR. Manual App ID/AppSecret remain an explicit
 advanced option. Authorization lasts120000ms including QR refresh; cancel, expiry,
@@ -75,8 +76,9 @@ An already accepted apply owns its captured credential and continues to its trut
 outcome if authorization expires or is cancelled; a new attempt requires authorization.
 No real QQ enrollment is performed by automated acceptance.
 
-For Matrix, enter user ID/homeserver/access token and choose **验证并读取房间** before
-committing. The existing SDK verifies whoami and reads joined rooms/metadata without
+For Matrix, enter user ID/homeserver/access token and choose **验证账号** before
+saving the account and waiting for its connection. The existing SDK verifies
+whoami and reads joined rooms/metadata without
 starting sync, pinning identity, storing a credential or granting access. Encrypted
 rooms are shown as unsupported, and a successful empty list differs from a failed
 request. Editing identity/address/token invalidates the result and cancels the prior
@@ -84,7 +86,13 @@ request. Leaving an existing-account replacement blank uses its vaulted credenti
 server-side. Cancel discards the draft. Verification/listing share one configured
 operation deadline and retire all request I/O before releasing ownership.
 
-Grant chats, then configure wake rules separately. QQ candidates distinguish locally
+After the account connection is ready, find chats and explicitly save selected grants
+and wake rules. A first save can associate an account with its agent with an empty
+chat scope; leaving after a successful apply retains the account without granting chats.
+When editing an existing account, preserve its saved scopes and wake rules until the
+operator explicitly saves changes to them. Discovery can be retried or deferred.
+
+QQ candidates distinguish locally
 observed conversations from configured pins, not a complete upstream directory. Manual
 native IDs are explicit and are not claims of verification. Selecting an observed/verified QQ private contact and explicitly saving grants only
 that contact's native peer. Receipt/discovery alone never grants access. Existing empty
@@ -154,7 +162,8 @@ message IDs. Native SDK request logging remains quiet. These events classify slo
 validation/drain/persist/connect/recovery without inventing a cause for the earlier
 production Matrix latency or original live save outcome, both still unknown.
 
-Cancel discards a draft. Pause removes agent access and cancels ineligible queued
+Cancel discards unsaved changes; it does not remove a successfully applied account.
+Pause removes agent access and cancels ineligible queued
 wakes during admission rechecks. Unbind revokes that connection's scopes without
 deleting history; removing the final binding retains the independent consumer connection and token. No
 unknown send is automatically repeated. Delivery snapshots retain original

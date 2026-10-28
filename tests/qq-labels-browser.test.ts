@@ -147,7 +147,8 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       await wait("!!document.querySelector('.bindings')");
       await click("＋ 绑定账号");
       await click("qq-main qq · qq-app 已连接");
-      await click("下一步");
+      await click("保存并连接");
+      await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
       await click("读取可用聊天 / 重试");
       await wait("document.querySelectorAll('.chat-label').length>=3");
       const anonymous = f.app.store.db
@@ -206,7 +207,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       expect(review).toContain("私聊");
       expect(review).toContain("Owned unnamed contact");
       await shot("qq-review");
-      await click("保存并应用");
+      await click("保存聊天授权");
       await wait("!document.querySelector('[role=dialog]')");
       await browser("reload");
       await wait("!!document.querySelector('.binding-details')");

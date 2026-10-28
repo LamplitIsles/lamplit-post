@@ -293,7 +293,7 @@ dd {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  overflow: auto;
+  overflow: hidden;
   max-width: 640px;
 }
 .stepper {
@@ -308,9 +308,6 @@ dd {
 .stepper .current {
   color: var(--foreground);
   font-weight: 650;
-}
-.editor-body {
-  min-height: 220px;
 }
 .hint {
   font-size: 12px;
@@ -517,11 +514,12 @@ dd {
   flex-direction: column;
   max-width: 680px;
   max-height: 90dvh;
-  overflow-y: auto;
+  overflow: hidden;
 }
-.editor-body {
+.binding-dialog > .editor-body {
   min-height: 0;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  overflow-y: auto;
 }
 .qr {
   max-width: 100%;

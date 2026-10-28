@@ -169,12 +169,11 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       ).toBe(true);
       await click("编辑绑定");
       await browser(["fill", "#credential", correctedA]);
-      await click("验证并读取房间");
+      await click("验证账号");
       await wait("document.body.textContent.includes('账号已验证')");
-      await click("下一步");
-      await click("下一步");
-      await click("下一步");
-      await click("保存并应用");
+      await click("保存并连接");
+      await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
+      await click("稍后完成");
       await wait("!document.querySelector('[role=dialog]')");
       await wait("document.body.textContent.includes('设置已生效')");
       expect(
@@ -186,13 +185,10 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       await click("编辑绑定");
       await browser(["fill", "#credential", replacementA]);
       a.matrixCredential(replacementA);
-      await click("验证并读取房间");
+      await click("验证账号");
       await wait("document.body.textContent.includes('账号已验证')");
       a.matrixCredential(correctedA);
-      await click("下一步");
-      await click("下一步");
-      await click("下一步");
-      await click("保存并应用");
+      await click("保存并连接");
       await wait("document.body.textContent.includes('已保留账号和聊天草稿')");
       expect(
         await evaluate(
@@ -231,10 +227,11 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         ),
       ).toBe(true);
       await browser(["find", "role", "button", "click", "--name", "Account B"]);
+      await click("保存并连接");
+      await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
       await click("下一步");
       await click("下一步");
-      await click("下一步");
-      await click("保存并应用");
+      await click("保存聊天授权");
       await wait("window.__ownedSaves.length > 0");
       expect(
         await evaluate(
