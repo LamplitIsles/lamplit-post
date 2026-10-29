@@ -4,6 +4,8 @@ import { readFile, open, rename, unlink, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { privateFile } from "./config";
 
+export const ADMIN_SESSION_SECONDS = 30 * 24 * 60 * 60;
+
 export async function passwordHash(password: string, salt: string) {
   return new Promise<Buffer>((resolve, reject) =>
     scrypt(
@@ -83,7 +85,7 @@ export class Admin {
         /^[A-Za-z0-9_-]{43}$/.test(s.csrf) &&
         Number.isFinite(s.expires) &&
         s.expires > now &&
-        s.expires <= now + 8 * 3600000
+        s.expires <= now + ADMIN_SESSION_SECONDS * 1000
       )
         this.sessions.set(s.digest, { csrf: s.csrf, expires: s.expires });
   }
@@ -128,7 +130,7 @@ export class Admin {
       const token = randomBytes(32).toString("base64url");
       this.session(token, {
         csrf: randomBytes(32).toString("base64url"),
-        expires: now + 8 * 3600000,
+        expires: now + ADMIN_SESSION_SECONDS * 1000,
       });
       await this.persist();
       return token;

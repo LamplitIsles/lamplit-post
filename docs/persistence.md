@@ -48,7 +48,8 @@ needed. Names do not participate in identity pins or admission. Consumer connect
 receiver credential per agent. Binding account associations do not grant chat access.
 
 The existing separate private administrator record also retains up to32 browser
-session token digests, CSRF values and their original eight-hour expiry. Login and
+session token digests, CSRF values and their original absolute expiry. New sessions
+expire 30 days after login without renewal; existing sessions retain their expiry. Login and
 logout serialize atomic private file replacement and await it before acknowledgement;
 management shutdown drains those request jobs. Normal stop clears memory without
 revoking retained sessions. Offline administrator reprovision replaces the record,

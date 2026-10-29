@@ -36,7 +36,8 @@ master key, encrypted platform/receiver secrets and agent tokens. Keep it outsid
 the data directory and distinct from the config/key. No online first-user setup,
 recovery URL or default password exists.
 
-Open the configured origin. Login sessions expire eight hours after login and use
+Open the configured origin. New login sessions expire 30 days after login without
+renewal on use; previously issued sessions retain their original expiry. They use
 HttpOnly SameSite=Strict cookies. Unexpired sessions survive normal process restart
 and deployment within the same installation; restart does not extend their expiry.
 The existing private administrator record stores only salted token digests, CSRF

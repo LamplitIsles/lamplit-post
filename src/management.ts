@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve, extname, sep } from "node:path";
-import { Admin } from "./admin";
+import { Admin, ADMIN_SESSION_SECONDS } from "./admin";
 import { Settings } from "./settings";
 import { Fault, need } from "./errors";
 import { isShareURL } from "./config";
@@ -131,7 +131,7 @@ export async function serveSettings(
             auth(token);
             res.setHeader(
               "Set-Cookie",
-              `post_admin=${token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=28800${origin.protocol === "https:" ? "; Secure" : ""}`,
+              `post_admin=${token}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${ADMIN_SESSION_SECONDS}${origin.protocol === "https:" ? "; Secure" : ""}`,
             );
             return send(200, { csrf: admin.session(token)!.csrf });
           }
