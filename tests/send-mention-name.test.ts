@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
 import { settingsFixture } from "./fixtures/settings";
 import { until } from "./fixtures/state";
-import { start } from "../src/runtime";
+import { start } from "./fixtures/runtime-ready";
 import { Content, ToolInputs } from "../contracts/v1/index";
 
 test("public named mentions resolve only selected-chat observed QQ speakers or Matrix joined members and pin retries", async () => {

@@ -578,6 +578,25 @@ a {
   flex: 1;
   min-width: 0;
 }
+.account-detail {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.account-attention {
+  color: oklch(0.45 0.11 55);
+  font-weight: 600;
+}
+@media (max-width: 520px) {
+  .account-identity {
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr);
+    align-items: start;
+    row-gap: 4px;
+  }
+  .account-identity > [data-slot="badge"] {
+    grid-column: 2;
+  }
+}
 .binding-heading {
   align-items: flex-start;
 }

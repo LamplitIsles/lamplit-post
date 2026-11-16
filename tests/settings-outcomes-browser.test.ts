@@ -11,7 +11,7 @@ import type { startQrConnect } from "@tencent-connect/qqbot-connector";
 // Optional explicit Chromium gate; actual packaged UI, owned native SDK endpoints,
 // callbacks and HOME supplied by the ordinary test runner, no provider enrollment.
 test.skipIf(!process.env.POST_BROWSER_CHECK)(
-  "browser distinguishes unsaved retirement and retains QQ authorization through failed apply and explicit retry",
+  "browser distinguishes unsaved retirement and retains QQ authorization while the account recovers",
   async () => {
     let callback!: Parameters<typeof startQrConnect>[0],
       scans = 0;
@@ -128,21 +128,23 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       await wait("document.body.textContent.includes('已授权机器人')");
       f.platform.tokenStall(true);
       await click("保存并连接");
-      await wait("document.body.textContent.includes('已保留账号和聊天草稿')");
-      expect(f.app.status().state).toBe("failed_recovered");
+      await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
+      expect(f.app.status().applied).toBe(true);
       expect(
         await evaluate(
-          "!!document.querySelector('[role=dialog]') && document.body.textContent.includes('已授权机器人') && !document.querySelector('#next').disabled",
+          "!!document.querySelector('[role=dialog]') && document.body.textContent.includes('账号已保存')",
         ),
       ).toBe(true);
-      expect(f.app.config.accounts).toEqual([]);
+      expect(f.app.config.accounts).toHaveLength(1);
       f.platform.tokenStall(false);
-      await click("保存并连接");
-      await wait("document.body.textContent.includes('账号已连接。查找聊天')");
       await click("稍后完成");
       await wait("!document.querySelector('[role=dialog]')");
       await until(() => !f.app.status().busy);
       expect(f.app.status().applied).toBe(true);
+      await until(
+        () => f.app.app.service?.platforms.get(f.app.config.accounts[0].id)?.ready,
+        10000,
+      );
       expect(scans).toBe(1);
       const account = f.app.config.accounts[0];
       expect(

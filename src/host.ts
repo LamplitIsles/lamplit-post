@@ -11,13 +11,29 @@ import type { AccountConfig, Scope } from "./config";
 import type { Service } from "./service";
 import type { ContentV1, MessageV1 } from "../contracts/v1/index";
 import { need } from "./errors";
+import { isSqliteError } from "./store";
 /** Native endpoint replacements exist only as an injected test seam, never in TOML/API. */
 export interface TransportFixture {
   qqOrigin?: string;
   qqGateway?: string;
+  /** Test-only retry interval; production configuration cannot set this. */
+  recoveryDelayMs?: number;
 }
 export class Host {
   sockets = new Set<any>();
+  readonly controller = new AbortController();
+  attentionReason: string | null = null;
+  readonly jobs = new Set<Promise<unknown>>();
+  signal(parent?: AbortSignal) {
+    return this.service.signal(
+      AbortSignal.any([this.controller.signal, ...(parent ? [parent] : [])]),
+    );
+  }
+  track<T>(job: Promise<T>): Promise<T> {
+    this.jobs.add(job);
+    void job.finally(() => this.jobs.delete(job)).catch(() => {});
+    return job;
+  }
   nativeBots = new Set<{ stop(): Promise<unknown> }>();
   forks: any[] = [];
   ctx: Context;
@@ -26,6 +42,7 @@ export class Host {
     public service: Service,
     public fixture: TransportFixture = {},
     root: Context,
+    readonly accounts: AccountConfig[] = service.config.accounts,
   ) {
     this.ctx = root;
     // Upstream loggers can include raw request/response bodies. Only Post safe categories are exported.
@@ -35,10 +52,7 @@ export class Host {
     this.ctx.http.defaultDecoder = async (response) =>
       JSON.parse(
         new TextDecoder().decode(
-          await boundedBytes(
-            response,
-            service.signal(this.operations.getStore()),
-          ),
+          await boundedBytes(response, this.signal(this.operations.getStore())),
         ),
       );
     const sockets = this.sockets;
@@ -65,24 +79,39 @@ export class Host {
       }
       init.redirect = "error";
       init.signal = AbortSignal.any([
-        service.signal(this.operations.getStore()),
+        this.signal(this.operations.getStore()),
         ...(init.signal ? [init.signal] : []),
       ]);
     });
   }
   async start() {
-    for (const config of this.service.config.accounts) {
+    for (const config of this.accounts) {
+      this.controller.signal.throwIfAborted();
       this.service.stopSignal.signal.throwIfAborted();
-      const secret = await this.service.store.secret(
-        config.credential,
-        config.id,
-        "platform",
-      );
+      let secret: string;
+      try {
+        secret = await this.service.store.secret(
+          config.credential,
+          config.id,
+          "platform",
+        );
+      } catch (error) {
+        if (isSqliteError(error)) this.service.storageFailed = true;
+        else this.attentionReason = "credential_unavailable";
+        throw error;
+      }
+      this.controller.signal.throwIfAborted();
       this.service.stopSignal.signal.throwIfAborted();
       if (config.platform === "matrix") {
         this.forks.push(
           this.ctx.plugin((ctx: Context) => {
-            const bot = new MatrixUserBot(ctx, config, this.service, secret);
+            const bot = new MatrixUserBot(
+              ctx,
+              config,
+              this.service,
+              secret,
+              this,
+            );
             this.nativeBots.add(bot);
             this.service.platforms.set(config.id, bot);
           }),
@@ -113,8 +142,9 @@ export class Host {
       }
     }
 
+    this.controller.signal.throwIfAborted();
     this.service.stopSignal.signal.throwIfAborted();
-    for (const config of this.service.config.accounts) {
+    for (const config of this.accounts) {
       if (config.platform === "qq") {
         const bot = this.ctx.bots.find(
           (b) =>
@@ -134,15 +164,39 @@ export class Host {
         await platform.start();
       }
     }
-    const signal = this.service.signal();
-    while ([...this.service.platforms.values()].some((p) => !p.ready)) {
+    const signal = this.signal();
+    while (
+      this.accounts.some((a) => !this.service.platforms.get(a.id)?.ready)
+    ) {
       signal.throwIfAborted();
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
-  async stop() {
-    await Promise.allSettled([...this.nativeBots].map((bot) => bot.stop()));
-    await Promise.all(
+  private stopping?: Promise<void>;
+  stop() {
+    return (this.stopping ??= this.retire());
+  }
+  private async retire() {
+    this.controller.abort();
+    let failed = false;
+    let storageFailure = false;
+    const record = (error: unknown) => {
+      failed = true;
+      if (isSqliteError(error)) storageFailure = true;
+    };
+    const platformStops = await Promise.allSettled(
+      this.accounts.map((account) =>
+        this.service.platforms.get(account.id)?.stop(),
+      ),
+    );
+    for (const result of platformStops)
+      if (result.status === "rejected") record(result.reason);
+    const nativeStops = await Promise.allSettled(
+      [...this.nativeBots].map((bot) => bot.stop()),
+    );
+    for (const result of nativeStops)
+      if (result.status === "rejected") record(result.reason);
+    const socketStops = await Promise.allSettled(
       [...this.sockets].map(
         (socket) =>
           new Promise<void>((resolve) => {
@@ -166,8 +220,20 @@ export class Host {
           }),
       ),
     );
+    for (const result of socketStops)
+      if (result.status === "rejected") record(result.reason);
+    await Promise.allSettled([...this.jobs]);
     for (const fork of this.forks.reverse()) {
-      fork.dispose();
+      try {
+        fork.dispose();
+      } catch (error) {
+        record(error);
+      }
+    }
+    if (failed) {
+      const error = new Error("Account adapter retirement failed");
+      if (storageFailure) Object.assign(error, { code: "ERR_SQLITE_ERROR" });
+      throw error;
     }
   }
 }
@@ -178,11 +244,14 @@ export class QQPlatform implements Platform {
   get ready() {
     return (
       !this.stopped &&
+      this.pinned &&
       this.bot.status === 1 &&
-      !this.service.errors.has(this.config.id)
+      (!this.service.errors.has(this.config.id) ||
+        this.service.errors.get(this.config.id) === "capacity")
     );
   }
   stopped = false;
+  pinned = false;
   chain: Promise<unknown> = Promise.resolve();
   pending = 0;
   private initialGroupLookup?: AbortController;
@@ -203,7 +272,9 @@ export class QQPlatform implements Platform {
         else if (!this.stopped)
           void host.service
             .track(host.service.store.gap(config.id, "connection_gap"))
-            .catch(() => {});
+            .catch((error) => {
+              if (isSqliteError(error)) host.service.storageFailed = true;
+            });
       }
     });
   }
@@ -211,15 +282,20 @@ export class QQPlatform implements Platform {
     return this.host.service;
   }
   async start() {
-    const signal = this.service.signal();
+    const signal = this.host.signal();
     while (this.bot.status !== 1) {
       signal.throwIfAborted();
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     await this.service.store.pin(this.config.id, "qq", this.config.native_id);
+    this.pinned = true;
     return;
   }
-  async stop() {
+  private stopping?: Promise<void>;
+  stop() {
+    return (this.stopping ??= this.retire());
+  }
+  private async retire() {
     this.stopped = true;
     try {
       await this.bot.stop();
@@ -236,8 +312,10 @@ export class QQPlatform implements Platform {
   }
   async groupName(native: string, signal: AbortSignal) {
     signal.throwIfAborted();
-    const guild = await this.host.operations.run(signal, () =>
-      this.bot.getGuild(native),
+    const guild = await this.host.track(
+      this.host.operations.run(this.host.signal(signal), () =>
+        this.bot.getGuild(native),
+      ),
     );
     signal.throwIfAborted();
     return guild.id === native && typeof guild.name === "string"
@@ -272,7 +350,9 @@ export class QQPlatform implements Platform {
       this.service.errors.set(this.config.id, "capture_capacity");
       void this.service
         .track(this.service.store.gap(this.config.id, "capture_capacity"))
-        .catch(() => {});
+        .catch((error) => {
+          if (isSqliteError(error)) this.service.storageFailed = true;
+        });
       void this.stop();
       return;
     }
@@ -281,15 +361,18 @@ export class QQPlatform implements Platform {
     qqInbound({ stage: "sdk_capture", type, native_event, category: "queued" });
     this.chain = this.chain
       .then(() => this.capture(session))
-      .catch(() => {
+      .catch((error) => {
+        if (isSqliteError(error)) this.service.storageFailed = true;
         qqInbound({
           stage: "sdk_capture",
           type,
           native_event,
           category: "capture_failed",
         });
-        this.service.errors.set(this.config.id, "capture_stopped");
-        void this.bot.stop();
+        if (!this.service.errors.has(this.config.id))
+          this.service.errors.set(this.config.id, "capture_stopped");
+        if (this.service.errors.get(this.config.id) !== "capacity")
+          void this.bot.stop();
       })
       .finally(() => {
         this.pending--;
@@ -423,48 +506,58 @@ export class QQPlatform implements Platform {
     replySequence = 1,
     onDispatch: () => void = () => {},
   ) {
-    return this.host.operations.run(signal, async () => {
-      const session = this.bot.session({
-        channel: { id: scope.native_id, type: scope.type === "direct" ? 1 : 0 },
-        user: {
-          id: scope.type === "direct" ? scope.native_id : this.config.native_id,
-        },
-        timestamp: reply?.timestamp ?? Date.now(),
-        message: reply ? { id: reply.native_message_id } : undefined,
-      });
-      let fragment: h.Fragment;
-      if (part.type === "text") fragment = h.text(part.text);
-      // The published group encoder has no at visitor; use its public native text syntax.
-      else if (part.type === "mention")
-        fragment = h.text(`<@${part.native_user_id}>`);
-      else {
-        const meta = await this.service.assets.metadata(part.asset_id);
-        const bytes = await this.service.assets.bytes(part.asset_id, signal);
-        fragment = h(part.type === "image" ? "img" : "file", {
-          src: `data:${meta.mime};base64,${bytes.toString("base64")}`,
-          title: meta.name,
+    const accountSignal = this.host.signal(signal);
+    return this.host.track(
+      this.host.operations.run(accountSignal, async () => {
+        const session = this.bot.session({
+          channel: {
+            id: scope.native_id,
+            type: scope.type === "direct" ? 1 : 0,
+          },
+          user: {
+            id:
+              scope.type === "direct" ? scope.native_id : this.config.native_id,
+          },
+          timestamp: reply?.timestamp ?? Date.now(),
+          message: reply ? { id: reply.native_message_id } : undefined,
         });
-      }
-      if (reply) {
-        need(Date.now() - reply.timestamp < 295000, "invalid_request");
-        fragment = [
-          h("passive", {
-            messageId: reply.native_message_id,
-            seq: replySequence,
-          }),
-          h.quote(reply.native_message_id),
+        let fragment: h.Fragment;
+        if (part.type === "text") fragment = h.text(part.text);
+        // The published group encoder has no at visitor; use its public native text syntax.
+        else if (part.type === "mention")
+          fragment = h.text(`<@${part.native_user_id}>`);
+        else {
+          const meta = await this.service.assets.metadata(part.asset_id);
+          const bytes = await this.service.assets.bytes(
+            part.asset_id,
+            accountSignal,
+          );
+          fragment = h(part.type === "image" ? "img" : "file", {
+            src: `data:${meta.mime};base64,${bytes.toString("base64")}`,
+            title: meta.name,
+          });
+        }
+        if (reply) {
+          need(Date.now() - reply.timestamp < 295000, "invalid_request");
+          fragment = [
+            h("passive", {
+              messageId: reply.native_message_id,
+              seq: replySequence,
+            }),
+            h.quote(reply.native_message_id),
+            fragment,
+          ];
+        }
+        accountSignal.throwIfAborted();
+        onDispatch();
+        const results = await this.bot.createMessage(
+          scope.native_id,
           fragment,
-        ];
-      }
-      signal.throwIfAborted();
-      onDispatch();
-      const results = await this.bot.createMessage(
-        scope.native_id,
-        fragment,
-        undefined,
-        { session: session as any },
-      );
-      return results.map((r) => r.id).filter(Boolean) as string[];
-    });
+          undefined,
+          { session: session as any },
+        );
+        return results.map((r) => r.id).filter(Boolean) as string[];
+      }),
+    );
   }
 }

@@ -58,11 +58,22 @@ node /opt/post/dist/cli.cjs token-revoke --config /etc/post/post.toml --agent cf
 ```
 
 Status and offline mutations refuse the serving lease. During serve, `/healthz`
-exposes safe readiness/backlog categories. MCP and assets require the agent
-Bearer on every request. The CLI reports `ready: true` only after SDK startup,
-machine listener binding and a healthy runtime. Opt-in management availability
-is reported separately as `settings_ready: true`; native startup failure can
-leave settings available with `ready: false` and a null machine URL.
+returns `{healthy:true}` with HTTP 200 when Post can safely serve and recover,
+even if every account is disconnected or an account's backlog is full or held.
+Shared storage or dispatcher failure and shutdown return 503. MCP and assets require
+an agent Bearer on every request. Account connection state and per-binding/account
+pending and held counts are available to authenticated administrators in settings
+and status. Retry times are approximate Unix milliseconds; safe reasons never include
+credentials, upstream error text or messages. A full account cannot capture the
+message that exceeded its quota; its other queued deliveries can still drain. This
+is not a promise that messages missed during an outage will be recovered.
+If an account scope cannot be safely retired, it needs attention without a scheduled
+retry; Post will not create a replacement connection. Shutdown reports failure and
+retains the store lease rather than releasing ownership while retirement is uncertain.
+
+The CLI reports `ready: true` once the machine listener and service are available;
+account readiness is independent. Opt-in management availability is reported
+separately as `settings_ready: true`.
 SIGINT/SIGTERM abort and drain actual I/O before releasing
 the database/key lease. Startup never installs dependencies or downloads code.
 The [service template](../deploy/lamplit-post.service) is inert until an operator
@@ -178,7 +189,7 @@ retains existing pending/reconciliation behavior; diagnostics add no sends/retri
 health reads/QQ lifecycle transitions. `category` is `healthy`, `degraded` or
 `stopped`; counts are `qq_total`, `qq_ready`, `matrix_total`, `matrix_ready`,
 `pending`, `held`, `backlog_full` (0/1), `capture_errors`, `dispatch_errors`,
-`other_errors`. Pending alone does not make health false. Readiness counts explain
+`other_errors`. Account readiness, held and full counts alone do not make health false. Readiness counts explain
 platform/error/backlog conditions; they cannot prove receipt of an absent message.
 Neither event includes identifiers, names, message content, URLs, headers,
 credentials or upstream error strings. No telemetry polling or correlation store

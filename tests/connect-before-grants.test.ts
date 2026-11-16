@@ -254,6 +254,13 @@ test("saved empty-scope account discovers actual QQ events without grants, then 
     });
     expect((await f.request("settings", proposal)).status).toBe(409);
 
+    await until(
+      () =>
+        f.app.config.accounts.every(
+          (a) => f.app.app.service?.platforms.get(a.id)?.ready,
+        ),
+      5000,
+    );
     const matrix = await (
       await f.request("discover", { account_id: "matrix-main" })
     ).json();
@@ -314,6 +321,13 @@ test("saved empty-scope account discovers actual QQ events without grants, then 
     expect((await f.request("settings", grant)).status).toBe(200);
     await f.app.pending;
     expect((await (await f.request("status")).json()).applied).toBe(true);
+    await until(
+      () =>
+        f.app.config.accounts.every(
+          (a) => f.app.app.service?.platforms.get(a.id)?.ready,
+        ),
+      5000,
+    );
     const final = editable(await (await f.request("settings")).json());
     expect(final.bindings[0]).toEqual(original.bindings[0]);
     expect(final.bindings[1].scopes).toEqual(grant.bindings[1].scopes);

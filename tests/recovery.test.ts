@@ -2,7 +2,8 @@ import { count } from "./fixtures/state";
 import { test, expect } from "vitest";
 import { Store } from "../src/store";
 import { Service } from "../src/service";
-import { start } from "../src/runtime";
+import { start as startRuntime } from "../src/runtime";
+import { start } from "./fixtures/runtime-ready";
 import { stateFixture, until } from "./fixtures/state";
 import { platformsFixture } from "./fixtures/platforms";
 import { consumerFixture } from "./fixtures/consumer";
@@ -132,7 +133,7 @@ test("queue saturation rolls back message and wake together and exposes capture 
     ).rejects.toBeDefined();
     expect(({ n: await count(store.db, "messages") } as any).n).toBe(1);
     expect(({ n: await count(store.db, "deliveries") } as any).n).toBe(1);
-    expect((await service.status()).healthy).toBe(false);
+    expect((await service.status()).healthy).toBe(true);
     expect(({ n: await count(store.db, "gaps") } as any).n).toBe(1);
   } finally {
     await service.stop();
@@ -219,21 +220,24 @@ test("actual platform restart stores initial catchup without waking and reopens 
   }
 }, 15000);
 
-test("stalled QQ token acquisition cancels actual HTTP and releases startup ownership", async () => {
+test("stalled QQ token acquisition cancels actual HTTP and releases ownership on stop", async () => {
   const p = await platformsFixture(),
     s = await stateFixture(p.url, "http://127.0.0.1:1", 200);
+  let app: Awaited<ReturnType<typeof startRuntime>> | undefined;
   try {
     p.tokenStall(true);
-    const before = Date.now();
-    await expect(
-      start(s.config, { qqOrigin: p.url, qqGateway: p.gateway }),
-    ).rejects.toThrow();
-    expect(Date.now() - before).toBeLessThan(1500);
-    await until(async () => p.aborts > 0);
+    app = await startRuntime(s.config, {
+      qqOrigin: p.url,
+      qqGateway: p.gateway,
+    });
+    await until(() => p.calls.some((c) => c.path === "/app/getAppAccessToken"));
+    await app.stop();
+    await until(() => p.aborts > 0);
     expect(p.sendCount).toBe(0);
     const store = await Store.open(s.config);
     await store.close();
   } finally {
+    await app?.stop();
     await p.close();
     await s.close();
   }

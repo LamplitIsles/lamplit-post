@@ -193,13 +193,21 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
         native_id: a.platform === "matrix" ? "@wrong:fixture" : a.native_id,
       })),
     });
-    const failedStart = await run(["serve", "--config", path]);
-    expect(failedStart.code).toBe(1);
+    serving = processFixture([artifact, "serve", "--config", path], {
+      cwd: s.dir,
+      env: serveEnv,
+    });
+    const isolated = await serving.ready();
+    expect((await fetch(isolated.url + "/healthz")).status).toBe(200);
+    serving.kill("SIGTERM");
+    expect((await serving.exited).code).toBe(0);
+    serving = undefined;
     await write(config);
     const store = await Store.open(config);
     expect(store.authenticate(token)).toBe("cfl");
     expect((await run(["status", "--config", path])).code).toBe(1);
     await store.close();
+    const connectionsBefore = p.qqConnections;
     serving = processFixture([artifact, "serve", "--config", path], {
       cwd: s.dir,
       env: serveEnv,
@@ -210,6 +218,7 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     client = await connect(ready.url, token);
     expect((await client.listTools()).tools).toHaveLength(7);
     stage = "receiver first-attempt outage";
+    await until(() => p.qqConnections > connectionsBefore, 5000);
     p.sendQQ("GROUP_AT_MESSAGE_CREATE", "artifact receiver wake");
     await until(() => receiver.attempts.length === 1);
     await client.close();
@@ -285,6 +294,19 @@ test("extracted Node artifact validates without writes, provisions, locks, crash
     stage = "MCP reconnect after crash";
     client = await connect(ready.url, token);
     stage = "unknown send reconciliation";
+    await until(
+      async () =>
+        !(
+          await client!.callTool({
+            name: "read_messages",
+            arguments: {
+              account_id: "matrix-main",
+              conversation_name: "Matrix 群聊 3",
+            },
+          })
+        ).isError,
+      5000,
+    );
     const result = await client.callTool({
       name: "send_message",
       arguments: args,

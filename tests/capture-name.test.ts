@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
 import { settingsFixture } from "./fixtures/settings";
 import { until } from "./fixtures/state";
-import { start } from "../src/runtime";
+import { start } from "./fixtures/runtime-ready";
 import { Message, PostEventV1, ToolOutputs } from "../contracts/v1/index";
 
 test("SDK capture snapshots genuine optional names into strict archive/delivery/history without lookups or historical rewrites", async () => {

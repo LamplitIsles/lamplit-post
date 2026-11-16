@@ -2,7 +2,13 @@ import { qqInbound } from "./diagnostics";
 import type { Tables } from "./models";
 import { createHmac } from "node:crypto";
 import { Config, Binding, Scope, accountOwner } from "./config";
-import { Store, opaque, digest, checkConversationPin } from "./store";
+import {
+  Store,
+  opaque,
+  digest,
+  checkConversationPin,
+  isSqliteError,
+} from "./store";
 import { Assets } from "./assets";
 import { Fault, need } from "./errors";
 import { ensureConversationName } from "./conversation-name";
@@ -21,6 +27,16 @@ export class Service {
   assets: Assets;
   platforms = new Map<string, Platform>();
   errors = new Map<string, string>();
+  storageFailed = false;
+  private deliveryWake = new Map<string, () => void>();
+  accountStates = new Map<
+    string,
+    {
+      state: "connected" | "recovering" | "needs_attention";
+      reason: string | null;
+      next_retry_at: number | null;
+    }
+  >();
   stopSignal = new AbortController();
   jobs = new Set<Promise<unknown>>();
   closed = false;
@@ -213,6 +229,11 @@ export class Service {
     direction: "inbound" | "outbound" = "inbound",
   ) {
     need(!this.closed, "unavailable");
+    if (
+      this.errors.get(account) === "capacity" &&
+      this.accountBacklog(account).every((b) => b.pending + b.held < b.limit)
+    )
+      this.errors.delete(account);
     if (this.errors.has(account)) throw new Fault("unavailable");
     const a = this.config.accounts.find((a) => a.id === account)!;
     const diagnostic = a.platform === "qq" && direction === "inbound";
@@ -388,9 +409,11 @@ export class Service {
             const count = (
               db
                 .prepare(
-                  "SELECT count(*) AS n FROM deliveries WHERE `binding` = ? AND `state` IN (?,?)",
+                  "SELECT count(*) AS n FROM deliveries d JOIN messages m ON m.id=d.message WHERE d.`binding` = ? AND m.account = ? AND d.`state` IN (?,?)",
                 )
-                .get(b.id, ...["pending", "held"]) as unknown as { n: number }
+                .get(b.id, account, ...["pending", "held"]) as unknown as {
+                n: number;
+              }
             ).n;
             need(count < this.config.backlog_limit, "capacity");
             const event = PostEventV1.parse({
@@ -430,6 +453,8 @@ export class Service {
               : "archived",
           ...summary,
         });
+      for (const b of this.config.bindings)
+        this.deliveryWake.get(`${b.id}\0${account}`)?.();
       return result;
     } catch (e) {
       if (diagnostic)
@@ -438,10 +463,20 @@ export class Service {
           type: o.conversation_type,
           category: "observation_failed",
         });
-      this.errors.set(account, e instanceof Fault ? e.code : "storage");
+      this.errors.set(
+        account,
+        e instanceof Fault
+          ? e.code
+          : isSqliteError(e)
+            ? "storage"
+            : "capture_stopped",
+      );
+      if (isSqliteError(e)) this.storageFailed = true;
       try {
         await this.store.gap(account, "capture_stopped");
-      } catch {}
+      } catch (error) {
+        if (isSqliteError(error)) this.storageFailed = true;
+      }
       throw e;
     }
   }
@@ -1117,15 +1152,17 @@ export class Service {
     } catch {}
     return result;
   }
-  async dispatch(binding: Binding) {
+  async dispatch(binding: Binding, account?: string) {
     const row = (
       this.store.db
         .prepare(
-          "SELECT * FROM deliveries WHERE `binding` = ? AND `state` IN (?,?) ORDER BY `seq` ASC LIMIT ?",
+          "SELECT d.* FROM deliveries d JOIN messages m ON m.id=d.message WHERE d.`binding` = ? AND d.`state` IN (?,?) AND (? IS NULL OR m.account = ?) ORDER BY d.`seq` ASC LIMIT ?",
         )
         .all(
           binding.id,
           ...["pending", "held"],
+          account ?? null,
+          account ?? null,
           1,
         ) as unknown as Tables["deliveries"][]
     )[0];
@@ -1232,36 +1269,92 @@ export class Service {
   }
   async startDispatch() {
     for (const row of this.store.db
-      .prepare("SELECT * FROM deliveries WHERE `state` IN (?,?)")
-      .all(...["pending", "held"]) as unknown as Tables["deliveries"][])
-      if (!this.config.bindings.some((b) => b.id === row.binding))
+      .prepare(
+        "SELECT d.id,d.binding,m.account FROM deliveries d LEFT JOIN messages m ON m.id=d.message WHERE d.state IN (?,?)",
+      )
+      .all("pending", "held") as unknown as {
+      id: string;
+      binding: string;
+      account: string | null;
+    }[]) {
+      const binding = this.config.bindings.find((b) => b.id === row.binding);
+      if (
+        !binding ||
+        !row.account ||
+        !binding.account_ids.includes(row.account)
+      )
         this.store.db
-          .prepare(
-            "UPDATE deliveries SET `state` = ?,`category` = ? WHERE `id` = ?",
-          )
-          .run("cancelled", "binding_removed", row.id);
+          .prepare("UPDATE deliveries SET state=?,category=? WHERE id=?")
+          .run(
+            "cancelled",
+            binding ? "scope_revoked" : "binding_removed",
+            row.id,
+          );
+    }
 
     for (const b of this.config.bindings)
-      this.track(
-        (async () => {
-          while (!this.closed && !this.errors.has(b.id)) {
-            await this.dispatch(b).catch(() => {
-              this.errors.set(b.id, "dispatch_storage");
-            });
-            await new Promise<void>((resolve) => {
-              const t = setTimeout(done, 100);
-              const signal = this.stopSignal.signal;
-              function done() {
-                clearTimeout(t);
-                signal.removeEventListener("abort", done);
-                resolve();
-              }
-              signal.addEventListener("abort", done, { once: true });
-              if (signal.aborted) done();
-            });
-          }
-        })(),
-      );
+      for (const account of b.account_ids)
+        this.track(
+          (async () => {
+            while (!this.closed && !this.storageFailed) {
+              await this.dispatch(b, account).catch(() => {
+                this.errors.set(b.id, "dispatch_storage");
+                this.storageFailed = true;
+              });
+              if (this.closed || this.storageFailed) break;
+              const head = this.store.db
+                .prepare(
+                  "SELECT d.state,d.due,d.receiver FROM deliveries d JOIN messages m ON m.id=d.message WHERE d.binding=? AND m.account=? AND d.state IN ('pending','held') ORDER BY d.seq LIMIT 1",
+                )
+                .get(b.id, account) as
+                { state: string; due: number; receiver: string } | undefined;
+              const receiver = this.config.agents.find(
+                (a) => a.id === b.agent_id,
+              )?.receiver_url;
+              const delay =
+                !head || (head.state === "held" && head.receiver !== receiver)
+                  ? null
+                  : Math.max(0, head.due - Date.now());
+              if (delay === 0) continue;
+              await new Promise<void>((resolve) => {
+                const key = `${b.id}\0${account}`;
+                const signal = this.stopSignal.signal;
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                const done = () => {
+                  if (timer) clearTimeout(timer);
+                  this.deliveryWake.delete(key);
+                  signal.removeEventListener("abort", done);
+                  resolve();
+                };
+                this.deliveryWake.set(key, done);
+                signal.addEventListener("abort", done, { once: true });
+                if (delay !== null) timer = setTimeout(done, delay);
+                if (signal.aborted) done();
+              });
+            }
+          })().catch(() => {
+            this.errors.set(b.id, "dispatch_storage");
+            this.storageFailed = true;
+          }),
+        );
+  }
+  accountBacklog(account: string) {
+    return this.config.bindings
+      .filter((b) => b.account_ids.includes(account))
+      .map((binding) => {
+        const counts = this.store.db
+          .prepare(
+            "SELECT d.state, count(*) AS count FROM deliveries d JOIN messages m ON m.id=d.message WHERE d.binding=? AND m.account=? AND d.state IN ('pending','held') GROUP BY d.state",
+          )
+          .all(binding.id, account) as { state: string; count: number }[];
+        return {
+          binding_id: binding.id,
+          account_id: account,
+          pending: counts.find((r) => r.state === "pending")?.count ?? 0,
+          held: counts.find((r) => r.state === "held")?.count ?? 0,
+          limit: this.config.backlog_limit,
+        };
+      });
   }
   private lastHealthDiagnostic = "";
   async status(forceDiagnostic = false) {
@@ -1274,31 +1367,19 @@ export class Service {
       ).n;
       if (count) backlog.push({ state, count });
     }
-    let full = false;
-    for (const b of this.config.bindings)
-      if (
-        (
-          this.store.db
-            .prepare(
-              "SELECT count(*) AS n FROM deliveries WHERE `binding` = ? AND `state` IN (?,?)",
-            )
-            .get(b.id, ...["pending", "held"]) as unknown as { n: number }
-        ).n >= this.config.backlog_limit
-      )
-        full = true;
+    const perAccount = this.config.accounts.flatMap((a) =>
+      this.accountBacklog(a.id),
+    );
+    const full = perAccount.some((r) => r.pending + r.held >= r.limit);
     const result = {
-      healthy:
-        !backlog.some((r) => r.state === "held") &&
-        !full &&
-        !this.closed &&
-        this.errors.size === 0 &&
-        [...this.platforms.values()].every((p) => p.ready),
-      accounts: [...this.platforms].map(([id, p]) => ({
-        account_id: id,
-        ready: p.ready,
-        error: this.errors.get(id) ?? null,
+      healthy: !this.closed && !this.store.owner.closed && !this.storageFailed,
+      accounts: this.config.accounts.map((a) => ({
+        account_id: a.id,
+        ready: this.platforms.get(a.id)?.ready ?? false,
+        error: this.errors.get(a.id) ?? null,
       })),
       backlog,
+      per_account_backlog: perAccount,
       errors: [...this.errors].map(([scope, category]) => ({
         scope,
         category,

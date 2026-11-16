@@ -148,9 +148,9 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       ).toBe(0);
       child = run("serve");
       const availability = await child.settingsReady();
-      expect(availability.ready).toBe(false);
+      expect(availability.ready).toBe(true);
       expect(availability.settings_ready).toBe(true);
-      expect(availability.url).toBeNull();
+      expect(availability.url).toBeTruthy();
       await browser([
         "--allowed-domains",
         "127.0.0.1",
@@ -164,9 +164,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
         `window.__ownedSaves=[];const originalFetch=window.fetch.bind(window);window.fetch=async(...args)=>{const response=await originalFetch(...args);if(String(args[0]).endsWith('/api/settings')&&args[1]?.method==='POST'){const value=await response.clone().json();window.__ownedSaves.push({status:response.status,saved:value.saved,applied:value.applied,state:value.state,error:value.error});}return response};true`,
       );
       // Cold-start native rejection remains repairable through the actual editor.
-      expect(
-        await evaluate("document.body.textContent.includes('服务未就绪')"),
-      ).toBe(true);
+      await wait("document.body.textContent.includes('需要检查')");
       await click("编辑绑定");
       await browser(["fill", "#credential", correctedA]);
       await click("验证账号");
@@ -189,19 +187,19 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       await wait("document.body.textContent.includes('账号已验证')");
       a.matrixCredential(correctedA);
       await click("保存并连接");
-      await wait("document.body.textContent.includes('已保留账号和聊天草稿')");
+      await wait("document.querySelector('[data-slot=dialog-title]')?.textContent.trim()==='查找聊天'");
       expect(
         await evaluate(
-          "!!document.querySelector('[role=dialog]') && document.querySelector('#credential').value.length > 0",
+          "!!document.querySelector('[role=dialog]') && document.body.textContent.includes('账号已保存')",
         ),
       ).toBe(true);
       expect(await readFile(path, "utf8")).toBe(beforeReplacement);
       expect(
         await evaluate(
-          "(async()=>{const s=await(await fetch('/api/status')).json();return s.ready && !s.saved && !s.applied && s.state==='failed_recovered' && s.accepted_version===s.active_version})()",
+          "(async()=>{const s=await(await fetch('/api/status')).json();return s.ready && s.saved && s.applied && s.state==='applied' && s.accepted_version===s.active_version})()",
         ),
       ).toBe(true);
-      await browser(["press", "Escape"]);
+      await click("稍后完成");
       await wait("!document.querySelector('[role=dialog]')");
       await evaluate("window.__ownedSaves=[];true");
       await click("编辑绑定");
@@ -329,7 +327,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
             "matrix-secret",
             "matrix-main",
             "platform",
-          )) === correctedA,
+          )) === replacementA,
         ).toBe(true);
         expect(
           reopened.db

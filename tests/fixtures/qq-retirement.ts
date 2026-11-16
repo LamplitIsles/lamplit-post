@@ -30,6 +30,7 @@ async function main() {
         await app.start();
         intake = true;
       } catch {}
+      await until(() => !!stopping);
       await stopping;
       console.log(
         JSON.stringify({
@@ -50,6 +51,7 @@ async function main() {
       } catch {
         failed = true;
       }
+      await until(() => p.qqAttempts > 0, 5000);
       await app.stop();
       console.log(
         JSON.stringify({

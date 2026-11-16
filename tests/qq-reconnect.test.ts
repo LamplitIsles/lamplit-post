@@ -1,6 +1,6 @@
 import { test, expect } from "vitest";
 import { consumerFixture } from "./fixtures/consumer";
-import { start } from "../src/runtime";
+import { start } from "./fixtures/runtime-ready";
 import { platformsFixture } from "./fixtures/platforms";
 import { stateFixture, until } from "./fixtures/state";
 
@@ -27,7 +27,7 @@ test("first established QQ socket recovers while Matrix stays ready", async () =
     p.disconnectQQ();
     await until(() => !qq.ready);
     expect(matrix.ready).toBe(true);
-    expect((await fetch(app.http.url + "/healthz")).status).toBe(503);
+    expect((await fetch(app.http.url + "/healthz")).status).toBe(200);
     try {
       await until(() => qq.ready, 2500);
     } finally {

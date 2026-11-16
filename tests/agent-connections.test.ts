@@ -24,6 +24,13 @@ test("owned caller Matrix then QQ zero-grant association, observed candidates th
     expect(r.status).toBe(200);
     const result = await r.json();
     expect(result.applied).toBe(true);
+    await until(
+      () =>
+        f.app.config.accounts.every(
+          (a) => f.app.app.service?.platforms.get(a.id)?.ready,
+        ),
+      5000,
+    );
     return result;
   };
   try {
@@ -247,6 +254,13 @@ test("connection rotation authenticates both SDK channels, changed destination h
       ).ok,
     ).toBe(true);
     await f.app.store.issue("other");
+    await until(
+      () =>
+        f.app.config.accounts.every(
+          (a) => f.app.app.service?.platforms.get(a.id)?.ready,
+        ),
+      5000,
+    );
     v = editable(await f.app.view());
     // Existing pending recipient stays byte-identical when agent URL changes.
     f.platform.sendQQ("GROUP_AT_MESSAGE_CREATE", "before rotation");
@@ -268,6 +282,13 @@ test("connection rotation authenticates both SDK channels, changed destination h
         },
       ],
     });
+    await until(
+      () =>
+        f.app.config.accounts.every(
+          (a) => f.app.app.service?.platforms.get(a.id)?.ready,
+        ),
+      5000,
+    );
     f.platform.sendQQ("GROUP_AT_MESSAGE_CREATE", "rotated qq");
     f.platform.sendMatrix({
       body: "rotated matrix",
@@ -297,11 +318,22 @@ test("connection rotation authenticates both SDK channels, changed destination h
       ],
     });
     await f.apply("settings", editable(await f.app.view()));
+    await until(
+      () =>
+        f.app.config.accounts.every(
+          (a) => f.app.app.service?.platforms.get(a.id)?.ready,
+        ),
+      5000,
+    );
     f.platform.sendQQ("GROUP_AT_MESSAGE_CREATE", "second rotation");
     await until(() => captures.length === 3);
     f.app.store.db
       .prepare("UPDATE deliveries SET state='pending',due=0 WHERE id=?")
       .run(immutable.id);
+    await f.app.app.service!.dispatch(
+      f.app.config.bindings.find((b) => b.agent_id === "cfl")!,
+      "qq-main",
+    );
     await until(
       () =>
         f.app.store.db

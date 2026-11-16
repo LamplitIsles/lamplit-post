@@ -12,10 +12,11 @@ import {
   MsgType,
 } from "matrix-js-sdk";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { opaque } from "./store";
+import { opaque, isSqliteError } from "./store";
 import { need } from "./errors";
 import type { Service } from "./service";
 import type { AccountConfig, Scope } from "./config";
+import type { Host } from "./host";
 import type { Platform, Observation } from "./platform";
 import type { ContentV1, MessageV1 } from "../contracts/v1/index";
 /** Existing account access-token adapter. No AS registration or crypto device. */
@@ -38,6 +39,7 @@ export class MatrixUserBot
     config: AccountConfig,
     public service: Service,
     accessToken: string,
+    private host: Host,
   ) {
     super(ctx, config, "matrix-user");
     this.platform = "matrix";
@@ -71,24 +73,26 @@ export class MatrixUserBot
       useAuthorizationHeader: true,
       // Own background SDK requests through complete body/cancellation retirement.
       fetchFn: ((input: any, init: any) =>
-        this.service.track(
-          (async () => {
-            need(!this.stopped && !this.service.closed, "unavailable");
-            const signal = this.service.signal(this.operations.getStore());
-            const response = await fetch(input, {
-              ...init,
-              redirect: "error",
-              signal: AbortSignal.any([
-                signal,
-                ...(init?.signal ? [init.signal] : []),
-              ]),
-            });
-            const bytes = await boundedBytes(response, signal);
-            return new Response(bytes, {
-              status: response.status,
-              headers: response.headers,
-            });
-          })(),
+        this.host.track(
+          this.service.track(
+            (async () => {
+              need(!this.stopped && !this.service.closed, "unavailable");
+              const signal = this.host.signal(this.operations.getStore());
+              const response = await fetch(input, {
+                ...init,
+                redirect: "error",
+                signal: AbortSignal.any([
+                  signal,
+                  ...(init?.signal ? [init.signal] : []),
+                ]),
+              });
+              const bytes = await boundedBytes(response, signal);
+              return new Response(bytes, {
+                status: response.status,
+                headers: response.headers,
+              });
+            })(),
+          ),
         )) as typeof fetch,
     });
     this.client.on(ClientEvent.Sync, (state, _previous, data) => {
@@ -117,7 +121,9 @@ export class MatrixUserBot
           this.service.errors.set(config.id, "capture_capacity");
           void this.service
             .track(this.service.store.gap(config.id, "capture_capacity"))
-            .catch(() => {});
+            .catch((error) => {
+              if (isSqliteError(error)) this.service.storageFailed = true;
+            });
           this.client.stopClient();
           this.ready = false;
           return;
@@ -125,10 +131,14 @@ export class MatrixUserBot
         const catchup = !this.live || data?.liveEvent === false;
         this.chain = this.chain
           .then(() => this.capture(event, room, catchup))
-          .catch(() => {
-            this.service.errors.set(config.id, "capture_stopped");
-            this.client.stopClient();
-            this.ready = false;
+          .catch((error) => {
+            if (isSqliteError(error)) this.service.storageFailed = true;
+            if (!this.service.errors.has(config.id))
+              this.service.errors.set(config.id, "capture_stopped");
+            if (this.service.errors.get(config.id) !== "capacity") {
+              this.client.stopClient();
+              this.ready = false;
+            }
           })
           .finally(() => {
             this.pending--;
@@ -137,15 +147,42 @@ export class MatrixUserBot
     );
   }
   async start() {
-    const identity = await this.operations.run(this.service.signal(), () =>
-      this.client.whoami(),
-    );
+    let identity: Awaited<ReturnType<MatrixClient["whoami"]>>;
+    try {
+      identity = await this.operations.run(this.host.signal(), () =>
+        this.client.whoami(),
+      );
+    } catch (error) {
+      if (
+        (error as { httpStatus?: number })?.httpStatus === 401 ||
+        (error as { httpStatus?: number })?.httpStatus === 403
+      )
+        this.host.attentionReason = "authentication_rejected";
+      throw error;
+    }
+    if (identity.user_id !== this.config.native_id)
+      this.host.attentionReason = "identity_mismatch";
     need(identity.user_id === this.config.native_id, "conflict");
-    await this.service.store.pin(this.config.id, "matrix", identity.user_id);
+    try {
+      await this.service.store.pin(this.config.id, "matrix", identity.user_id);
+    } catch (error) {
+      if (isSqliteError(error)) this.service.storageFailed = true;
+      else if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "conflict"
+      )
+        this.host.attentionReason = "identity_mismatch";
+      throw error;
+    }
     await this.client.startClient({ initialSyncLimit: 20 });
     return;
   }
-  async stop() {
+  private stopping?: Promise<void>;
+  stop() {
+    return (this.stopping ??= this.retire());
+  }
+  private async retire() {
     this.stopped = true;
     this.live = false;
     this.ready = false;

@@ -172,6 +172,9 @@ test("stop retains ownership until Matrix background body cancellation retires",
         ),
     );
     await until(() => reading, 1500);
+    const bot = app.service!.platforms.get(
+      "matrix-main",
+    ) as import("../src/matrix").MatrixUserBot;
     const closing = app.stop().then(() => {
       stopped = true;
     });
@@ -186,9 +189,6 @@ test("stop retains ownership until Matrix background body cancellation retires",
     await closing;
     expect(bodyRetired).toBe(true);
     const calls = p.calls.length;
-    const bot = app.service!.platforms.get(
-      "matrix-main",
-    ) as import("../src/matrix").MatrixUserBot;
     await expect(bot.client.whoami()).rejects.toThrow();
     expect(p.calls.length).toBe(calls);
     expect(app.service!.jobs.size).toBe(0);

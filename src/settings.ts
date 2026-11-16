@@ -49,8 +49,6 @@ export class Settings {
       this.app = new Application(this.config, this.fixture, this.store);
       try {
         this.validate(this.config);
-        for (const a of this.config.accounts)
-          await this.store.secret(a.credential, a.id, "platform");
         for (const b of this.config.agents)
           await this.store.secret(b.receiver_credential, b.id, "receiver");
         need(!this.closed, "unavailable");
@@ -86,9 +84,7 @@ export class Settings {
       !!this.app?.http &&
       !!this.app.service &&
       !this.app.service.closed &&
-      [...this.app.service.platforms.values()].every(
-        (platform) => platform.ready,
-      );
+      !this.app.service.storageFailed;
     return {
       ready,
       version: this.version,
@@ -98,6 +94,15 @@ export class Settings {
       state: this.state,
       phase: this.phase,
       busy: this.mutating,
+      accounts: this.config.accounts.map((a) => ({
+        account_id: a.id,
+        ...(this.app?.service?.accountStates.get(a.id) ?? {
+          state: "recovering",
+          reason: "connecting",
+          next_retry_at: null,
+        }),
+        backlog: this.app?.service?.accountBacklog(a.id) ?? [],
+      })),
       saved:
         this.acceptedDurable &&
         this.currentKnown &&
@@ -162,6 +167,7 @@ export class Settings {
         .get(ref, account, kind);
     return {
       ...this.status(),
+      account_status: this.status().accounts,
       error: this.state === "failed" ? "unavailable" : null,
       machine_url: this.app.http?.url ?? null,
       accounts: this.config.accounts.map((a) => ({

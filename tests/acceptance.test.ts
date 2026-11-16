@@ -2,7 +2,7 @@ import { count } from "./fixtures/state";
 import { test, expect, vi } from "vitest";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { start } from "../src/runtime";
+import { start } from "./fixtures/runtime-ready";
 import { Store } from "../src/store";
 import { Service } from "../src/service";
 import { serve } from "../src/http";

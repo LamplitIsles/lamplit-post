@@ -123,8 +123,8 @@ counting a queued/received proposal as saved.
 
 Authenticated GET `/api/status` is nonblocking during connect. Settings/status separate
 `accepted_version` (the attempted durable save), `current_version`/`version` (current
-TOML authority) and `active_version` (actually ready runtime). `applied` refers to the
-latest successful apply and becomes true only after readiness. Version digests describe
+TOML authority) and `active_version` (the active runtime configuration). `applied` refers to the
+latest successful application of that configuration; account connectivity is reported separately. Version digests describe
 TOML bytes, not secret changes. A credential-only rollback can leave all three digests
 equal while the latest attempt reports saved:false/applied:false and old ready:true.
 The GUI follows this state and displays connect, recovery, applied or failed outcome.
@@ -135,16 +135,15 @@ bounds remain in force. On response loss or an
 empty/nonJSON error, read the existing version/status before deciding what to do;
 never automatically re-POST. A502/reset does not prove that nothing was saved.
 
-With B=`timeout_ms` (default30000ms), each replacement/restore connect+ready attempt
-has total B in addition to existing per-I/O deadlines. Retirement's outcome-reporting
-budget R=B+1000ms includes the existing WebSocket grace. Normal status budget is R+B
-plus measured local persistence; successful recovery at most2R+2B plus persistence;
-full failed/recovered reporting at most3R+2B plus persistence (default153000ms). There
-is one recovery attempt, no automatic loop. If true cancellation retirement exceeds
-R, state becomes failed_draining and all mutations stay blocked; Store/key/lease are
-retained until actual settlement, never forcibly released to satisfy reporting time.
-Matrix draft verification/listing also has total B; its response socket allows that
-bounded operation, while saved settings no longer await native connect in HTTP.
+Each account connects and recovers independently with bounded backoff. Confirmed
+identity or authentication failures, and unavailable sealed credentials, are reported
+as needing attention and retried slowly. Other platform failures are reported as
+recovering without guessing their cause. Account status includes the next retry time
+when known and per-binding pending/held counts. A transient platform failure does not
+roll back an otherwise applied configuration. Retirement still owns and drains actual
+I/O before a replacement starts; if retirement exceeds its budget, status is
+`failed_draining` and Store/key/lease stay owned until actual settlement. Matrix draft
+verification/listing remains bounded by `timeout_ms`.
 
 Failed apply attempts restore previous TOML/vault/runtime when possible. The original
 accepted version remains visible alongside restored current/active versions and
@@ -222,7 +221,10 @@ bundle. Backend tests use owned SDK fixtures and receiver endpoints. Real QQ/Mat
 account permissions and actual third-party add behavior require later operator
 acceptance; no live account, deployment or installed service is involved.
 
-If a newly verified account fails later during startup, rollback preserves its immutable identity and conversation pins. Discarding the wizard or reloading does not delete those pins. A subsequent successful Matrix identity check or QQ credential authorization can recover the original account ID only when that ID is absent from the current configuration. Candidates reuse existing conversation IDs. Configured accounts must be selected explicitly and retain their identity, homeserver and credential reference guards. Recovery does not restore grants, attach historical vault references, issue tokens or reveal secrets: supply a current credential and explicitly save the desired scope again. The submitted wizard draft remains available through terminal apply failure; success or explicit cancellation clears its credentials.
+A saved account can need attention or recover after its connection fails; its saved
+configuration and identity pins remain in place. Saving does not grant chats beyond the
+explicitly selected scope. Unsaved drafts and their credentials retain the existing
+cancel and authorization lifetime rules.
 
 The exact Matrix44 vendor patch also prevents late SDK startup and capability/keepalive polling after cancellation. It preserves the original timeoutSignal hunk and all native deadlines. Native body retirement remains owned by Post; cancelled-start public-SDK and application probes must exit naturally before cleanup is accepted. See `docs/dependencies.md` for the patch boundary.
 

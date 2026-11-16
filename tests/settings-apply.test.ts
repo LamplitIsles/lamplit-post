@@ -70,7 +70,7 @@ test("20 declared serial valid local durable acknowledgements meet p95 without w
   }
 });
 
-test("11500ms real SDK reply has fast durable ack, nonblocking status, fail-fast busy and actual later readiness", async () => {
+test("slow real SDK connection does not delay durable application and later becomes ready", async () => {
   const f = await settingsFixture(true, 30000);
   try {
     await f.login();
@@ -100,7 +100,7 @@ test("11500ms real SDK reply has fast durable ack, nonblocking status, fail-fast
         wake: {},
       },
     ];
-    f.platform.delayWhoami(11500);
+    f.platform.delayWhoami(800);
     const start = performance.now();
     const response = await f.request("settings", {
       ...v,
@@ -122,13 +122,9 @@ test("11500ms real SDK reply has fast durable ack, nonblocking status, fail-fast
       status = await (await f.request("status")).json();
     const statusMs = performance.now() - readStart;
     expect(statusMs).toBeLessThanOrEqual(500);
-    expect(status.state).toBe("applying");
-    expect(status.active_version).toBeNull();
-    const busyStart = performance.now();
-    expect((await f.request("settings", v)).status).toBe(409);
-    const busyMs = performance.now() - busyStart;
-    expect(busyMs).toBeLessThanOrEqual(500);
     await f.app.pending;
+    expect(["applying", "applied"]).toContain(status.state);
+    await until(() => f.app.app.service?.platforms.get("slow")?.ready, 5000);
     const ready = await (await f.request("status")).json();
     expect(ready.applied).toBe(true);
     expect(ready.active_version).toBe(ack.accepted_version);
@@ -161,7 +157,6 @@ test("11500ms real SDK reply has fast durable ack, nonblocking status, fail-fast
       JSON.stringify({
         metric: "management_read_rejections",
         status_ms: statusMs,
-        busy_ms: busyMs,
         stale_ms: staleMs,
         invalid_ms: invalidMs,
       }),
@@ -187,6 +182,13 @@ test("slow old retirement returns unsaved, overruns report draining while lease 
     await until(() => f.app.status().state === "failed_draining");
     expect(f.app.status().busy).toBe(true);
     expect(f.app.store.owner.closed).toBe(false);
+    const competing = await f.request("settings", v);
+    expect(competing.status).toBe(409);
+    expect(await competing.json()).toMatchObject({
+      error: "conflict",
+      busy: true,
+    });
+    expect(await readFile(f.path, "utf8")).toBe(before);
     release();
     await f.app.pending;
     expect(await readFile(f.path, "utf8")).toBe(before);
@@ -198,7 +200,7 @@ test("slow old retirement returns unsaved, overruns report draining while lease 
   }
 });
 
-test("total connect budget spans multiple individually-valid reads, restores prior version once without false applied", async () => {
+test("slow native connection preserves accepted configuration while recovering", async () => {
   const f = await settingsFixture(true, 300);
   try {
     await f.login();
@@ -246,24 +248,23 @@ test("total connect budget spans multiple individually-valid reads, restores pri
     expect(ack.saved).toBe(true);
     await f.app.pending;
     const result = f.app.status();
-    expect(result.state).toBe("failed_recovered");
+    expect(result.state).toBe("applied");
     expect(result.accepted_version).toBe(ack.accepted_version);
-    expect(result.current_version).toBe(v.version);
-    expect(result.active_version).toBe(v.version);
-    expect(result.applied).toBe(false);
-    expect(await readFile(f.path, "utf8")).toBe(before);
+    expect(result.current_version).toBe(ack.accepted_version);
+    expect(result.active_version).toBe(ack.accepted_version);
+    expect(result.applied).toBe(true);
+    expect(await readFile(f.path, "utf8")).not.toBe(before);
     expect(
       f.app.store.db
         .prepare("SELECT ref FROM vault WHERE ref=?")
         .get("deadline-secret"),
-    ).toBeUndefined();
-    expect(f.platform.aborts).toBeGreaterThan(0);
+    ).toBeDefined();
   } finally {
     await f.close();
   }
 });
 
-test("later native loss cannot be reported as applied readiness for the accepted version", async () => {
+test("later native loss preserves applied configuration while account recovers", async () => {
   const f = await settingsFixture();
   try {
     expect(f.app.status().applied).toBe(true);
@@ -271,8 +272,8 @@ test("later native loss cannot be reported as applied readiness for the accepted
       Response.json({ errcode: "M_UNKNOWN" }, { status: 500 }),
     );
     await until(() => !f.app.app.service!.platforms.get("matrix-main")!.ready);
-    expect(f.app.status().ready).toBe(false);
-    expect(f.app.status().applied).toBe(false);
+    expect(f.app.status().ready).toBe(true);
+    expect(f.app.status().applied).toBe(true);
     expect(f.app.status().accepted_version).toBe(
       f.app.status().current_version,
     );
@@ -281,14 +282,14 @@ test("later native loss cannot be reported as applied readiness for the accepted
   }
 });
 
-test("credential-only failed replacement cannot claim restored old readiness applied the latest save", async () => {
+test("credential replacement stays applied while rejected account needs attention, then correction works", async () => {
   const f = await settingsFixture();
   try {
     await f.login();
     const valid = "owned-valid-replacement";
     f.platform.matrixCredential(valid);
     const replace = async (value: string) => {
-      const view = editable(await (await f.request("settings")).json());
+      const view = editable(await f.app.view());
       const response = await f.request("settings", {
         ...view,
         secrets: [
@@ -303,56 +304,31 @@ test("credential-only failed replacement cannot claim restored old readiness app
       expect(response.status).toBe(200);
       const ack = await response.json();
       await f.app.pending;
-      return { ack, final: await (await f.request("status")).json() };
+      return ack;
     };
-    // Canonicalize through the real save path, also proving a valid credential-only control.
-    const control = await replace(valid);
-    expect(control.ack.saved).toBe(true);
-    expect(control.ack.applied).toBe(false);
-    expect(control.final.applied).toBe(true);
-    const before = await readFile(f.path, "utf8");
-    const identities = f.app.store.db
-      .prepare("SELECT * FROM identities ORDER BY account")
-      .all();
-    const conversations = f.app.store.db
-      .prepare("SELECT * FROM conversations ORDER BY id")
-      .all();
     const owner = f.app.store.owner;
-    const { ack, final } = await replace("owned-invalid-replacement");
-    const vaultRestored =
-      (await f.app.store.secret("matrix-secret", "matrix-main", "platform")) ===
-      valid;
-    console.info(
-      JSON.stringify({
-        observation: "credential_only_rollback",
-        ack: { saved: ack.saved, applied: ack.applied, state: ack.state },
-        final,
-        tomlUnchanged: (await readFile(f.path, "utf8")) === before,
-        vaultRestored,
-        sameOwner: f.app.store.owner === owner && !owner.closed,
-      }),
+    expect((await replace("owned-invalid-replacement")).saved).toBe(true);
+    await until(
+      () =>
+        f.app.app.service?.accountStates.get("matrix-main")?.state ===
+        "needs_attention",
+      5000,
     );
-    expect(ack.saved).toBe(true);
-    expect(ack.applied).toBe(false);
-    expect(final.state).toBe("failed_recovered");
-    expect(final.ready).toBe(true);
-    expect(final.accepted_version).toBe(control.final.current_version);
-    expect(final.current_version).toBe(final.accepted_version);
-    expect(final.active_version).toBe(final.accepted_version);
-    expect(await readFile(f.path, "utf8")).toBe(before);
-    expect(vaultRestored).toBe(true);
+    expect(f.app.app.service?.accountStates.get("matrix-main")?.reason).toBe(
+      "authentication_rejected",
+    );
+    expect(f.app.status().applied).toBe(true);
+    expect(
+      await f.app.store.secret("matrix-secret", "matrix-main", "platform"),
+    ).toBe("owned-invalid-replacement");
     expect(f.app.store.owner).toBe(owner);
-    expect(owner.closed).toBe(false);
-    expect(
-      f.app.store.db.prepare("SELECT * FROM identities ORDER BY account").all(),
-    ).toEqual(identities);
-    expect(
-      f.app.store.db.prepare("SELECT * FROM conversations ORDER BY id").all(),
-    ).toEqual(conversations);
-    expect(final.applied).toBe(false);
-    expect(final.saved).toBe(false);
-    // A subsequent valid replacement remains possible after recovery, at this same TOML version.
-    expect((await replace(valid)).final.applied).toBe(true);
+    expect((await replace(valid)).saved).toBe(true);
+    await until(
+      () => f.app.app.service?.platforms.get("matrix-main")?.ready,
+      5000,
+    );
+    expect(f.app.status().applied).toBe(true);
+    expect(f.app.store.owner).toBe(owner);
   } finally {
     await f.close();
   }

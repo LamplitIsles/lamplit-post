@@ -151,6 +151,13 @@ test("SDK configuration restart preserves exclusive owner, pins, unknown sends, 
       })
     ).json();
     expect(response.applied).toBe(true);
+    await until(
+      () =>
+        f.app.config.accounts.every(
+          (a) => f.app.app.service?.platforms.get(a.id)?.ready,
+        ),
+      5000,
+    );
     await store.issue("second");
     await expect(
       f.app.app.service!.call("second", "read_messages", {
@@ -221,7 +228,7 @@ test("genuine share QR round trips; wrong origins, credential links and secret d
     await f.close();
   }
 });
-test("failed SDK readiness restores TOML and sealed credentials, then retry applies", async () => {
+test("identity mismatch remains isolated while accepted settings persist", async () => {
   const f = await settingsFixture();
   try {
     await f.login();
@@ -249,15 +256,24 @@ test("failed SDK readiness restores TOML and sealed credentials, then retry appl
         ],
       })
     ).json();
-    expect(saved.applied).toBe(false);
-    expect(saved.saved).toBe(false);
-    expect(saved.state).toBe("failed_recovered");
-    expect(await readFile(f.path, "utf8")).toBe(text);
+    expect(saved.applied).toBe(true);
+    expect(saved.saved).toBe(true);
+    expect(saved.state).toBe("applied");
+    expect(await readFile(f.path, "utf8")).not.toBe(text);
+    await until(
+      () =>
+        f.app.app.service?.accountStates.get("wrong-matrix")?.state ===
+        "needs_attention",
+      5000,
+    );
+    expect(f.app.app.service?.accountStates.get("wrong-matrix")?.reason).toBe(
+      "identity_mismatch",
+    );
     expect(
       f.app.store.db
         .prepare("SELECT ref FROM vault WHERE ref=?")
         .get("wrong-platform"),
-    ).toBeUndefined();
+    ).toBeDefined();
     expect(f.app.app.service!.closed).toBe(false);
     const retry = editable(await (await f.request("settings")).json());
     retry.bindings[0].wake.aliases = ["retry"];
@@ -327,6 +343,7 @@ test("actual native send and immutable pending delivery retire across settings a
     expect((await (await f.apply("settings", retry)).json()).applied).toBe(
       true,
     );
+    await until(() => f.app.app.service?.platforms.get("qq-main")?.ready, 5000);
     expect(
       (await f.app.app.service!.call("cfl", "send_message", input)).status,
     ).toBe("unknown");
@@ -403,7 +420,7 @@ test("settings shutdown drains a cancelled apply and startup before releasing it
     await f.app.stop();
     await managementStopped;
     await applying;
-    expect(f.platform.aborts).toBeGreaterThan(0);
+    await until(() => f.platform.aborts > 0);
     const reopened = await Store.open(f.config);
     await reopened.close();
     // Immediate startup cancellation also covers resources acquired after the first await.

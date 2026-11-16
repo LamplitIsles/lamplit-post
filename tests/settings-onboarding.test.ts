@@ -337,13 +337,11 @@ test("QQ cancel and absolute expiry retire operation and ignore credentials with
   }
 });
 
-test("verified failed onboarding reuses orphan account and conversation pins after discard/reload, without reattaching credentials or grants", async () => {
+test("saved Matrix onboarding survives connection failure and preserves pins and grants on repair", async () => {
   const f = await settingsFixture(true, 300);
   try {
     await f.login();
-    const vaultBefore = f.app.store.db
-      .prepare("SELECT ref,account,kind FROM vault ORDER BY ref")
-      .all();
+    f.platform.matrixCredential("corrected-token");
     const account = {
       id: "retained",
       platform: "matrix",
@@ -368,7 +366,6 @@ test("verified failed onboarding reuses orphan account and conversation pins aft
       wake: {},
     };
     const initial = editable(await f.app.view());
-    f.platform.delayMatrixReads(200);
     const ack = await (
       await f.request("settings", {
         ...initial,
@@ -386,340 +383,83 @@ test("verified failed onboarding reuses orphan account and conversation pins aft
             ref: account.credential,
             account: account.id,
             kind: "platform",
-            value: "first-owned-token",
+            value: "rejected-token",
           },
           {
             ref: "retry-receiver",
             account: "retry-agent",
             kind: "receiver",
-            value: "first-owned-receiver",
+            value: "owned-receiver",
           },
         ],
       })
     ).json();
     expect(ack.saved).toBe(true);
     await f.app.pending;
-    expect(f.app.status().state).toBe("failed_recovered");
-    expect(f.app.config.accounts).toEqual([]);
-    const pins = () => ({
-      identities: f.app.store.db
-        .prepare("SELECT * FROM identities ORDER BY account")
-        .all(),
-      conversations: f.app.store.db
-        .prepare("SELECT id,account,native,type FROM conversations ORDER BY id")
-        .all(),
+    await until(
+      () =>
+        f.app.app.service?.accountStates.get(account.id)?.state ===
+        "needs_attention",
+      5000,
+    );
+    expect(f.app.status().applied).toBe(true);
+    const conversation = f.app.store.db
+      .prepare("SELECT id,account,native,type FROM conversations WHERE id=?")
+      .get("retained-room");
+    expect(conversation).toMatchObject({
+      account: account.id,
+      native: "!room:fixture",
     });
-    const before = pins();
-    expect(before.identities).toHaveLength(1);
-    expect(before.conversations).toHaveLength(1);
-    f.platform.delayMatrixReads(0);
-    const fresh = {
-      ...account,
-      id: "fresh-wizard",
-      credential: "fresh-secret",
-    };
-    const result = await (
-      await f.request("matrix/verify", {
-        account: fresh,
-        credential: "new-owned-token",
-      })
-    ).json();
-    expect(result.verified).toBe(true);
-    expect(result.account.id).toBe(account.id);
-    expect(result.account.credential).toBe("fresh-secret");
-    expect(
-      result.items.find((r: any) => r.native_id === "!room:fixture")
-        .conversation_id,
-    ).toBe("retained-room");
-    expect(pins()).toEqual(before);
-    expect(f.app.config.accounts).toEqual([]);
-    expect(
-      f.app.store.db
-        .prepare("SELECT ref,account,kind FROM vault ORDER BY ref")
-        .all(),
-    ).toEqual(vaultBefore);
-    expect(
-      f.app.verifiedDraftId.bind(f.app, "qq", "@post:fixture", account.id),
-    ).toThrow();
-    expect(
-      f.app.verifiedDraftId.bind(f.app, "matrix", "@wrong:fixture", account.id),
-    ).toThrow();
-    const reload = editable(await (await f.request("settings")).json());
-    const retry = await (
-      await f.request("settings", {
-        ...reload,
-        accounts: [result.account],
-        bindings: [binding],
-        agents: [
-          {
-            id: "retry-agent",
-            receiver_url: f.receiver.url,
-            receiver_credential: "retry-receiver",
-          },
-        ],
-        secrets: [
-          {
-            ref: result.account.credential,
-            account: account.id,
-            kind: "platform",
-            value: "new-owned-token",
-          },
-          {
-            ref: "retry-receiver",
-            account: "retry-agent",
-            kind: "receiver",
-            value: "new-owned-receiver",
-          },
-        ],
-      })
-    ).json();
-    expect(retry.saved).toBe(true);
-    await f.app.pending;
-    expect(f.app.status().applied).toBe(true);
-    expect(pins()).toEqual(before);
-    const configured = await readFile(f.path, "utf8");
-    expect(
-      (
-        await f.request("matrix/verify", {
-          account: fresh,
-          credential: "new-owned-token",
-        })
-      ).status,
-    ).toBe(400);
-    expect(
-      (
-        await f.request("matrix/verify", {
-          account: {
-            ...result.account,
-            homeserver: f.platform.url + "/different",
-          },
-          credential: "new-owned-token",
-        })
-      ).status,
-    ).toBe(409);
-    expect(await readFile(f.path, "utf8")).toBe(configured);
-    expect(pins()).toEqual(before);
-  } finally {
-    await f.close();
-  }
-});
-
-test("QQ failed apply retains the same server authorization for explicit retry within its original lifetime", async () => {
-  let cb!: Parameters<typeof startQrConnect>[0];
-  let scans = 0;
-  const connector: typeof startQrConnect = (callbacks) => {
-    cb = callbacks;
-    scans++;
-    callbacks.onQrDisplayed?.(
-      "https://q.qq.com/qqbot/openclaw/connect.html?task_id=owned-retry",
-    );
-    return () => callbacks.onFailure(Error("fixture cancelled"));
-  };
-  const f = await settingsFixture(true, 300, connector);
-  try {
-    await f.login();
-    const before = await readFile(f.path, "utf8");
-    const qr = await (
-      await f.request("connect/qq", {
-        action: "start",
-        account_id: "retry-scan",
-      })
-    ).json();
-    await until(() => !!cb);
-    cb.onSuccess([{ appId: "qq-app", appSecret: "owned-retained-credential" }]);
-    await until(
-      async () =>
-        (await (await f.request("connect/qq?id=" + qr.id)).json()).state ===
-        "authorized",
-    );
-    const submit = async () => {
-      const v = editable(await f.app.view());
-      v.accounts = [
+    const saved = editable(await f.app.view());
+    const repair = await f.request("settings", {
+      ...saved,
+      secrets: [
         {
-          id: "retry-scan",
-          platform: "qq",
-          native_id: "qq-app",
-          credential: "retained-secret",
-        },
-      ];
-      ownDraft(v, f);
-      return f.request("settings", {
-        ...v,
-        qq_authorization: { id: qr.id, account_id: "retry-scan" },
-      });
-    };
-    f.platform.tokenStall(true);
-    const first = await submit();
-    expect(first.status).toBe(200);
-    expect((await first.json()).saved).toBe(true);
-    await f.app.pending;
-    expect(f.app.status().state).toBe("failed_recovered");
-    expect(await readFile(f.path, "utf8")).toBe(before);
-    const pins = f.app.store.db
-      .prepare("SELECT * FROM identities ORDER BY account")
-      .all();
-    expect(
-      f.app.store.db
-        .prepare("SELECT ref FROM vault WHERE ref=?")
-        .get("retained-secret"),
-    ).toBeUndefined();
-    const retained = await (await f.request("connect/qq?id=" + qr.id)).json();
-    console.info(
-      JSON.stringify({
-        observation: "QQ failed apply authorization",
-        state: retained.state,
-        sameExpiry: retained.expires === qr.expires,
-        scans,
-        latest: f.app.status(),
-      }),
-    );
-    expect(retained.state).toBe("authorized");
-    expect(retained.expires).toBe(qr.expires);
-    expect(JSON.stringify(retained)).not.toContain("owned-retained-credential");
-    f.platform.tokenStall(false);
-    const retry = await submit();
-    expect(retry.status).toBe(200);
-    expect((await retry.json()).saved).toBe(true);
-    await f.app.pending;
-    expect(f.app.status().applied).toBe(true);
-    await until(
-      async () =>
-        (await (await f.request("connect/qq?id=" + qr.id)).json()).state ===
-        "committed",
-    );
-    expect(scans).toBe(1);
-    expect(
-      await f.app.store.secret("retained-secret", "retry-scan", "platform"),
-    ).toBe("owned-retained-credential");
-    expect(
-      f.app.store.db.prepare("SELECT * FROM identities ORDER BY account").all(),
-    ).toEqual([{ account: "retry-scan", platform: "qq", native: "qq-app" }]);
-    expect(pins).toEqual([]);
-    expect(
-      f.platform.calls
-        .filter((c) => c.path === "/app/getAppAccessToken")
-        .every((c) => c.body.clientSecret === "owned-retained-credential"),
-    ).toBe(true);
-  } finally {
-    await f.close();
-  }
-});
-
-test.each([false, true])(
-  "QQ authorization expiry during accepted apply preserves its outcome and forbids credential replay (failure=%s)",
-  async (failure) => {
-    let cb!: Parameters<typeof startQrConnect>[0];
-    const connector: typeof startQrConnect = (callbacks) => {
-      cb = callbacks;
-      return () => callbacks.onFailure(Error("fixture cancelled"));
-    };
-    const f = await settingsFixture(true, failure ? 300 : 1500, connector, 150);
-    let stage = "login";
-    try {
-      await f.login();
-      const qr = await (
-        await f.request("connect/qq", {
-          action: "start",
-          account_id: "expires-scan",
-        })
-      ).json();
-      await until(() => !!cb);
-      cb.onSuccess([
-        { appId: "qq-app", appSecret: "owned-expiring-credential" },
-      ]);
-      await until(
-        async () =>
-          (await (await f.request("connect/qq?id=" + qr.id)).json()).state ===
-          "authorized",
-      );
-      const v = editable(await f.app.view());
-      v.accounts = [
-        {
-          id: "expires-scan",
-          platform: "qq",
-          native_id: "qq-app",
-          credential: "expires-secret",
-        },
-      ];
-      const secrets = [];
-      if (failure) f.platform.tokenStall(true);
-      else {
-        v.accounts.push({
-          id: "slow-matrix",
-          platform: "matrix",
-          native_id: "@post:fixture",
-          homeserver: f.platform.url,
-          credential: "slow-matrix-secret",
-        });
-        secrets.push({
-          ref: "slow-matrix-secret",
-          account: "slow-matrix",
+          ref: account.credential,
+          account: account.id,
           kind: "platform",
-          value: "owned-slow-matrix",
-        });
-        f.platform.delayWhoami(300);
-      }
-      stage = "submit";
-      ownDraft(v, f);
-      const ack = await (
-        await f.request("settings", {
-          ...v,
-          secrets,
-          qq_authorization: { id: qr.id, account_id: "expires-scan" },
-        })
-      ).json();
-      expect(ack.saved).toBe(true);
-      expect(ack.applied).toBe(false);
-      stage = "await expiry";
-      await until(
-        async () =>
-          (await (await f.request("connect/qq?id=" + qr.id)).json()).state ===
-          "expired",
-      );
-      expect(f.app.status().busy).toBe(true);
-      stage = "await apply";
-      await f.app.pending;
-      expect(f.app.status().applied).toBe(!failure);
-      expect(f.app.status().saved).toBe(!failure);
-      stage = "read expired";
-      const expired = await (await f.request("connect/qq?id=" + qr.id)).json();
-      expect(expired.state).toBe("expired");
-      expect(expired.expires).toBe(qr.expires);
-      expect(JSON.stringify(expired)).not.toContain(
-        "owned-expiring-credential",
-      );
-      if (!failure)
-        expect(
-          await f.app.store.secret(
-            "expires-secret",
-            "expires-scan",
-            "platform",
-          ),
-        ).toBe("owned-expiring-credential");
-      stage = "reject replay";
-      expect(
-        (
-          await f.request("settings", {
-            ...editable(await f.app.view()),
-            accounts: v.accounts,
-            qq_authorization: { id: qr.id, account_id: "expires-scan" },
-          })
-        ).status,
-      ).toBe(503);
-    } catch (error) {
-      throw new Error("expiry apply stage: " + stage, { cause: error });
-    } finally {
-      await f.close();
-    }
-  },
-);
+          value: "corrected-token",
+        },
+      ],
+    });
+    expect(repair.status).toBe(200);
+    await f.app.pending;
+    await until(
+      () => f.app.app.service?.platforms.get(account.id)?.ready,
+      5000,
+    );
+    expect(
+      f.app.store.db
+        .prepare("SELECT id,account,native,type FROM conversations WHERE id=?")
+        .get("retained-room"),
+    ).toEqual(conversation);
+    expect(
+      f.app.store.db
+        .prepare(
+          "SELECT account,platform,native FROM identities WHERE account=?",
+        )
+        .get(account.id),
+    ).toEqual({
+      account: account.id,
+      platform: "matrix",
+      native: "@post:fixture",
+    });
+    expect(f.app.config.bindings[0]?.scopes[0]?.conversation_id).toBe(
+      "retained-room",
+    );
+  } finally {
+    await f.close();
+  }
+});
 
 test.each(["cancel", "logout"])(
-  "QQ %s during accepted apply invalidates retry authorization without undoing the captured save",
+  "QQ saved authorization is consumed once even when %s follows",
   async (action) => {
     let cb!: Parameters<typeof startQrConnect>[0];
-    const f = await settingsFixture(true, 1500, (callbacks) => {
+    let scans = 0;
+    const f = await settingsFixture(true, 300, (callbacks) => {
       cb = callbacks;
+      scans++;
       return () => callbacks.onFailure(Error("owned cancellation"));
     });
     try {
@@ -727,11 +467,11 @@ test.each(["cancel", "logout"])(
       const qr = await (
         await f.request("connect/qq", {
           action: "start",
-          account_id: "cancel-accepted",
+          account_id: "saved-scan",
         })
       ).json();
       await until(() => !!cb);
-      cb.onSuccess([{ appId: "qq-app", appSecret: "owned-cancel-accepted" }]);
+      cb.onSuccess([{ appId: "qq-app", appSecret: "owned-scan-secret" }]);
       await until(
         async () =>
           (await (await f.request("connect/qq?id=" + qr.id)).json()).state ===
@@ -740,74 +480,138 @@ test.each(["cancel", "logout"])(
       const v = editable(await f.app.view());
       v.accounts = [
         {
-          id: "cancel-accepted",
+          id: "saved-scan",
           platform: "qq",
           native_id: "qq-app",
-          credential: "cancel-secret",
-        },
-        {
-          id: "slow-matrix",
-          platform: "matrix",
-          native_id: "@post:fixture",
-          homeserver: f.platform.url,
-          credential: "slow-matrix-secret",
+          credential: "saved-secret",
         },
       ];
-      f.platform.delayWhoami(300);
+      ownDraft(v, f);
+      f.platform.tokenStall(true);
+      const ack = await (
+        await f.request("settings", {
+          ...v,
+          qq_authorization: { id: qr.id, account_id: "saved-scan" },
+        })
+      ).json();
+      expect(ack.saved).toBe(true);
+      await f.app.pending;
+      await until(
+        async () =>
+          (await (await f.request("connect/qq?id=" + qr.id)).json()).state ===
+          "committed",
+        5000,
+      );
+      expect(f.app.status().applied).toBe(true);
+      expect(
+        await f.app.store.secret("saved-secret", "saved-scan", "platform"),
+      ).toBe("owned-scan-secret");
+      expect(
+        JSON.stringify(await (await f.request("status")).json()),
+      ).not.toContain("owned-scan-secret");
+      if (action === "logout") {
+        expect((await f.request("logout", {})).status).toBe(200);
+        await f.login();
+      } else await f.request("connect/qq", { action: "cancel", id: qr.id });
+      const replay = await f.request("settings", {
+        ...editable(await f.app.view()),
+        qq_authorization: { id: qr.id, account_id: "saved-scan" },
+      });
+      expect(replay.ok).toBe(false);
+      expect(scans).toBe(1);
+      expect(
+        await f.app.store.secret("saved-secret", "saved-scan", "platform"),
+      ).toBe("owned-scan-secret");
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(["expired", "cancelled", "logout"])(
+  "QQ %s during a durably accepted apply cannot replay its authorization",
+  async (outcome) => {
+    let cb!: Parameters<typeof startQrConnect>[0];
+    const f = await settingsFixture(
+      true,
+      1500,
+      (callbacks) => {
+        cb = callbacks;
+        return () => callbacks.onFailure(Error("owned cancellation"));
+      },
+      outcome === "expired" ? 200 : 5000,
+    );
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await f.login();
+      const qr = await (
+        await f.request("connect/qq", {
+          action: "start",
+          account_id: "held-scan",
+        })
+      ).json();
+      await until(() => !!cb);
+      cb.onSuccess([{ appId: "qq-app", appSecret: "owned-held-secret" }]);
+      await until(
+        async () =>
+          (await (await f.request("connect/qq?id=" + qr.id)).json()).state ===
+          "authorized",
+      );
+      const connect = (f.app as any).connect.bind(f.app);
+      (f.app as any).connect = async (app: unknown) => {
+        await held;
+        return connect(app);
+      };
+      const v = editable(await f.app.view());
+      v.accounts = [
+        {
+          id: "held-scan",
+          platform: "qq",
+          native_id: "qq-app",
+          credential: "held-secret",
+        },
+      ];
       ownDraft(v, f);
       const ack = await (
         await f.request("settings", {
           ...v,
-          secrets: [
-            {
-              ref: "slow-matrix-secret",
-              account: "slow-matrix",
-              kind: "platform",
-              value: "owned-matrix",
-            },
-          ],
-          qq_authorization: { id: qr.id, account_id: "cancel-accepted" },
+          qq_authorization: { id: qr.id, account_id: "held-scan" },
         })
       ).json();
-      expect(ack.saved).toBe(true);
-      expect(ack.applied).toBe(false);
+      expect(ack).toMatchObject({ saved: true, applied: false });
       expect(f.app.status().busy).toBe(true);
-      const response =
-        action === "logout"
-          ? await f.request("logout", {})
-          : await f.request("connect/qq", { action: "cancel", id: qr.id });
-      expect(response.status).toBe(200);
-      await response.json();
+      if (outcome === "expired")
+        await until(
+          async () =>
+            (await (await f.request("connect/qq?id=" + qr.id)).json()).state ===
+            "expired",
+          3000,
+        );
+      else if (outcome === "cancelled")
+        expect(
+          (await f.request("connect/qq", { action: "cancel", id: qr.id }))
+            .status,
+        ).toBe(200);
+      else expect((await f.request("logout", {})).status).toBe(200);
+      release();
       await f.app.pending;
       expect(f.app.status().applied).toBe(true);
-      expect(f.app.status().saved).toBe(true);
       expect(
-        await f.app.store.secret(
-          "cancel-secret",
-          "cancel-accepted",
-          "platform",
-        ),
-      ).toBe("owned-cancel-accepted");
-      if (action === "logout") {
-        expect((await f.request("connect/qq?id=" + qr.id)).status).toBe(401);
-        await f.login();
-        expect((await f.request("connect/qq?id=" + qr.id)).status).toBe(401);
-      } else {
-        const cancelled = await (
-          await f.request("connect/qq?id=" + qr.id)
-        ).json();
-        expect(cancelled.state).toBe("cancelled");
-        expect(cancelled.expires).toBe(qr.expires);
-        expect(
-          (
-            await f.request("settings", {
-              ...editable(await f.app.view()),
-              qq_authorization: { id: qr.id, account_id: "cancel-accepted" },
-            })
-          ).status,
-        ).toBe(503);
-      }
+        await f.app.store.secret("held-secret", "held-scan", "platform"),
+      ).toBe("owned-held-secret");
+      if (outcome === "logout") await f.login();
+      const view = await f.app.view();
+      const replay = await f.request("settings", {
+        ...editable(view),
+        qq_authorization: { id: qr.id, account_id: "held-scan" },
+      });
+      expect(replay.ok).toBe(false);
+      expect(JSON.stringify(view)).not.toContain("owned-held-secret");
     } finally {
+      release();
       await f.close();
     }
   },

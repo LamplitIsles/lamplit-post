@@ -13,6 +13,7 @@
     csrf = "";
   let state = $state({
       accounts: [],
+      account_status: [],
       agents: [],
       bindings: [],
       version: "",
@@ -53,6 +54,8 @@
     if (selected?.platform !== "qq" && qqDraft) void clearQQ();
     if (!logged) {
       pollController?.abort();
+      accountStatusController?.abort();
+      accountStatusGeneration++;
       applying = false;
     }
   });
@@ -82,6 +85,9 @@
     return reasons;
   });
   let pollController;
+  let accountStatusController, accountStatusGeneration = 0;
+  let accountStatusUnavailable = $state(false);
+  let configurationStatus = $state("");
   let open = $state(false),
     draft = $state(null),
     selected = $state(null),
@@ -152,6 +158,54 @@
     if (rest.name === "") delete rest.name;
     return rest;
   };
+  const accountStatus = (id) =>
+    accountStatusUnavailable
+      ? undefined
+      : state.account_status?.find((item) => item.account_id === id);
+  function accountStateLabel(id) {
+    const status = accountStatus(id);
+    return status?.state === "connected"
+      ? "已连接"
+      : status?.state === "recovering"
+        ? "正在恢复"
+        : status?.state === "needs_attention"
+          ? "需要检查"
+          : "状态暂不可用";
+  }
+  function accountReason(status) {
+    switch (status?.reason) {
+      case "authentication_rejected":
+      case "credential_unavailable":
+        return "请检查账号凭据。";
+      case "identity_mismatch":
+        return "账号身份不匹配，请检查账号设置。";
+      case "capacity":
+      case "capture_capacity":
+        return "待处理消息过多，正在等待处理。";
+      case "capture_stopped":
+        return "消息接收中断，正在尝试恢复。";
+      case "storage":
+        return "存储暂时不可用，请检查 Post 服务。";
+      case "connection_unavailable":
+        return "连接暂时不可用，正在尝试恢复。";
+      default:
+        return status?.state === "needs_attention"
+          ? "请检查账号及 Post 服务状态。"
+          : "";
+    }
+  }
+  function retryTime(status) {
+    if (!Number.isFinite(status?.next_retry_at)) return "";
+    const date = new Date(status.next_retry_at);
+    return Number.isNaN(date.valueOf())
+      ? ""
+      : `下次尝试：${date.toLocaleString("zh-CN", { hour12: false })}`;
+  }
+  function backlogText(status, bindingId) {
+    const backlog = status?.backlog?.find((item) => item.binding_id === bindingId);
+    if (!backlog || (!backlog.pending && !backlog.held)) return "";
+    return `待投递 ${backlog.pending} 条${backlog.held ? ` · 等待处理 ${backlog.held} 条` : ""} · 上限 ${backlog.limit} 条`;
+  }
   const cleanBinding = (b) => {
     const { hasCredential, hasToken, ...rest } = b;
     if (rest.scopes)
@@ -245,10 +299,58 @@
     }
   }
   async function refresh() {
+    accountStatusGeneration++;
+    accountStatusController?.abort();
     state = await api("settings");
+    accountStatusUnavailable = false;
+    configurationStatus = "";
     applying = state.busy;
     if (applying && !pollController) void followApply();
     if (!agents.some(([id]) => id === agent)) agent = state.agents[0]?.id || "";
+  }
+  async function refreshAccountStatus() {
+    if (!logged || !state.version || accountStatusController || pollController || busy) return;
+    const controller = new AbortController();
+    const generation = accountStatusGeneration;
+    const version = state.version;
+    accountStatusController = controller;
+    try {
+      const status = await api("status", undefined, {
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]),
+      });
+      if (!controller.signal.aborted && logged && !busy && !pollController && generation === accountStatusGeneration && version === state.version) {
+        if (!Array.isArray(status.accounts)) throw new Error("Invalid account status");
+        if (status.busy || typeof status.current_version !== "string") {
+          if (configurationStatus !== "stale")
+            configurationStatus = status.busy ? "changing" : "unknown";
+          accountStatusUnavailable = true;
+          notice = "";
+          return;
+        }
+        if (status.version !== version || status.current_version !== version) {
+          configurationStatus = "stale";
+          accountStatusUnavailable = true;
+          notice = "";
+          return;
+        }
+        if (configurationStatus === "stale") return;
+        configurationStatus = "";
+        state.account_status = status.accounts;
+        state.state = status.state;
+        state.applied = status.applied;
+        state.ready = status.ready;
+        if (!status.applied && notice === "设置已生效") notice = "";
+        accountStatusUnavailable = false;
+      }
+    } catch {
+      if (!controller.signal.aborted && logged && generation === accountStatusGeneration) {
+        accountStatusUnavailable = true;
+        if (configurationStatus !== "stale") configurationStatus = "unknown";
+        notice = "";
+      }
+    } finally {
+      if (accountStatusController === controller) accountStatusController = undefined;
+    }
   }
   async function login() {
     await run(async () => {
@@ -267,14 +369,17 @@
         const status = await api("status", undefined, {
           signal: controller.signal,
         });
-        state = { ...state, ...status };
+        const { accounts, version, ...serviceStatus } = status;
+        const sameConfiguration = version === state.version && status.current_version === state.version;
+        state = { ...state, ...serviceStatus, account_status: sameConfiguration ? accounts : state.account_status };
+        accountStatusUnavailable = !sameConfiguration;
         applying = status.busy;
         if (!status.busy) {
           await refresh();
-          await finishDraft(status);
-          notice = status.applied
+          await finishDraft(state);
+          notice = state.applied
             ? "设置已生效"
-            : status.state === "failed_recovered"
+            : state.state === "failed_recovered"
               ? "新设置未生效，已恢复原设置。"
               : "连接未就绪，请检查账号后重试。";
           break;
@@ -307,6 +412,7 @@
     }
   }
   onMount(() => {
+    const statusTimer = setInterval(() => void refreshAccountStatus(), 5000);
     void (async () => {
       try {
         const s = await api("session");
@@ -320,6 +426,8 @@
       }
     })();
     return () => {
+      clearInterval(statusTimer);
+      accountStatusController?.abort();
       pollController?.abort();
       invalidateVerification();
       void clearQQ();
@@ -332,7 +440,7 @@
       if (draftSavePhase === "account") {
         const account = state.accounts.find((a) => a.id === selected?.id);
         const savedBinding = state.bindings.find((b) => b.id === draft?.id);
-        if (!account?.ready || !savedBinding) {
+        if (!account || !savedBinding) {
           saveUnknown = true;
           error = "账号状态暂时无法确认，请重新读取后检查。";
           return;
@@ -381,6 +489,8 @@
     consumers = state.agents,
     accepted,
   ) {
+    if (configurationStatus)
+      throw new Error("设置状态已变化。请先保留未保存的修改，关闭编辑后刷新。");
     if (saveUnknown)
       throw new Error("上次保存结果尚未确认。请先读取当前状态。");
     let result;
@@ -736,7 +846,7 @@
     const existing = state.accounts.find((a) => a.id === selected.id);
     const priorBinding = state.bindings.find((b) => b.id === draft.id);
     if (
-      existing?.ready &&
+      existing &&
       bindings.some((b) => b.account_ids.includes(selected.id)) &&
       !platformSecret &&
       JSON.stringify(cleanAccount(existing)) ===
@@ -977,6 +1087,14 @@
           上次保存的结果尚未确认。请先读取当前状态，再修改设置。
           <Button variant="outline" disabled={busy} onclick={inspectSave}>读取当前状态</Button>
         </div>{/if}
+      {#if configurationStatus}<div class="notice" role="alert">
+          {configurationStatus === "stale"
+            ? "设置已在其他位置更改。请保留未保存的修改，关闭编辑后刷新。"
+            : configurationStatus === "changing"
+              ? "设置正在其他位置更改，账号状态暂不可用。"
+              : "当前设置状态无法确认，请稍后刷新。"}
+          <Button variant="outline" disabled={busy || open || configurationStatus === "changing"} onclick={() => run(refresh)}>刷新设置</Button>
+        </div>{/if}
       {#if notice}<div class="notice" role="status">{notice}</div>{/if}
       {#if error && !state.version}<section class="empty">
           <h1>暂时无法读取连接</h1>
@@ -1013,7 +1131,9 @@
           <div class="section-head">
             <h2>聊天连接</h2>
             <small
-              >{state.state === "applied"
+              >{configurationStatus
+                ? "设置状态待确认"
+                : state.applied
                 ? "设置已生效"
                 : state.state === "failed_recovered"
                   ? "已恢复原设置"
@@ -1027,6 +1147,7 @@
                 <div class="identity identity-list">
                   {#each b.account_ids as accountId}{@const a =
                       state.accounts.find((a) => a.id === accountId)}
+                    {@const connectionStatus = accountStatus(accountId)}
                     <div class="account-identity">
                       <img
                         src={"/brand/platforms/" + a.platform + ".svg"}
@@ -1036,7 +1157,19 @@
                       />
                       <div>
                         <h3>{a.name || a.id}</h3>
-                        <small>{a.ready ? "已连接" : "连接不可用"}</small>
+                        <small
+                          class:account-attention={connectionStatus?.state === "needs_attention"}
+                          >{accountStateLabel(accountId)}</small
+                        >
+                        {#if accountReason(connectionStatus)}
+                          <small class="account-detail">{accountReason(connectionStatus)}</small>
+                        {/if}
+                        {#if retryTime(connectionStatus)}
+                          <small class="account-detail">{retryTime(connectionStatus)}</small>
+                        {/if}
+                        {#if backlogText(connectionStatus, b.id)}
+                          <small class="account-detail">{backlogText(connectionStatus, b.id)}</small>
+                        {/if}
                       </div>
                       <Badge variant="secondary"
                         >{b.enabled
@@ -1184,7 +1317,13 @@
           step
         ]}</Dialog.Title
       ><Dialog.Description
-        >{draftSavedVersion
+        >{configurationStatus
+          ? configurationStatus === "stale"
+            ? "设置已在其他位置更改。请保留未保存的修改，关闭编辑后刷新。"
+            : configurationStatus === "changing"
+              ? "设置正在其他位置更改，请保留未保存的修改。"
+              : "当前设置状态无法确认，请保留未保存的修改。"
+          : draftSavedVersion
           ? "设置已保存，正在连接。关闭不会撤销此次保存。"
           : step > 0
             ? "账号已保存。聊天授权需另行保存；离开不会撤销账号。"
@@ -1212,7 +1351,7 @@
                 ><strong>{a.name || a.id}</strong><small
                   >{a.platform} · {a.native_id}</small
                 ></span
-              ><Badge variant="outline">{a.ready ? "已连接" : "不可用"}</Badge
+              ><Badge variant="outline">{accountStateLabel(a.id)}</Badge
               ></button
             >{/each}<Button variant="outline" onclick={addAccount}
             >＋ 新建账号</Button
@@ -1339,7 +1478,9 @@
               </div>{/if}
           {/if}
         {:else if step === 1}<p class="hint">
-            账号已连接。查找聊天并选择要授权给此 agent 的范围。
+            {accountStatus(selected?.id)?.state === "connected"
+              ? "账号已连接。查找聊天并选择要授权给此 agent 的范围。"
+              : "账号已保存。连接恢复后可查找聊天，也可以稍后完成。"}
           </p>
           <div class="actions">
             <Button
@@ -1537,6 +1678,7 @@
               applying ||
               verifying ||
               saveUnknown ||
+              !!configurationStatus ||
               missing.length > 0}
             onclick={next}
             >{draftSavedVersion

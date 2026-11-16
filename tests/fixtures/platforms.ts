@@ -22,6 +22,7 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
   let matrixCredential: string | undefined;
   let whoamiDelay = 0;
   let matrixReadDelay = 0;
+  let rejectMatrixSync = false;
   let permission = false,
     tokenStall = false,
     gatewayStall = false,
@@ -294,6 +295,7 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
         },
       });
     if (path.endsWith("/sync")) {
+      if (rejectMatrixSync) return json({ errcode: "M_UNKNOWN" }, 503);
       if (syncPlan.length) return syncPlan.shift()!(req);
       if (syncCount++ > 0 && !matrixEvents.length && !stopped)
         await new Promise<void>((r) => {
@@ -357,7 +359,7 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
     get qqAttempts() {
       return qqAttempts;
     },
-    async rejectQQConnections() {
+    async rejectQQConnections(reject = true) {
       const configured = new Promise<void>((r) => {
         function listen(m: any) {
           if (m.configured) {
@@ -367,7 +369,7 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
         }
         child.on("message", listen);
       });
-      child.send({ rejectConnections: true });
+      child.send({ rejectConnections: reject });
       await configured;
     },
     get qqConnections() {
@@ -396,6 +398,10 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
       matrixCredential = value;
     },
     media,
+    rejectMatrixSync(value: boolean) {
+      rejectMatrixSync = value;
+      syncWake?.();
+    },
     planSync(handler: (req: Request) => Promise<Response> | Response) {
       syncPlan.push(handler);
       syncWake?.();

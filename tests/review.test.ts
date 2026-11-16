@@ -5,7 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { ClientEvent, RoomEvent } from "matrix-js-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { start } from "../src/runtime";
+import { start } from "./fixtures/runtime-ready";
 import { Store } from "../src/store";
 import type { MatrixUserBot } from "../src/matrix";
 import { platformsFixture } from "./fixtures/platforms";

@@ -72,6 +72,14 @@ export async function settingsFixture(
   try {
     web = await serveSettings(app, staticRoot, connector, qrLifetime);
     await app.start();
+    if (!empty)
+      await until(
+        () =>
+          config.accounts.every(
+            (a) => app.app.service?.platforms.get(a.id)?.ready,
+          ),
+        5000,
+      );
   } catch (error) {
     await web!?.stop();
     await app.stop();

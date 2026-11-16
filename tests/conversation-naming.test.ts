@@ -156,6 +156,10 @@ test("unnamed QQ contacts have distinct stable labels and administrator names su
         ],
       });
       expect(accepted.status).toBe(200);
+      await until(
+        () => f.app.app.service?.platforms.get("qq-main")?.ready,
+        5000,
+      );
       expect(
         f.app.store.db
           .prepare("SELECT name FROM conversations WHERE id=?")

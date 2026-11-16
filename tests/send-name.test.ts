@@ -1,7 +1,7 @@
 import { test, expect, vi } from "vitest";
 import { settingsFixture } from "./fixtures/settings";
 import { until } from "./fixtures/state";
-import { start } from "../src/runtime";
+import { start } from "./fixtures/runtime-ready";
 
 async function fixture() {
   const f = await settingsFixture();
@@ -55,6 +55,13 @@ async function fixture() {
         })
       ).status,
     ).toBe(200);
+    await until(
+      () =>
+        f.config.accounts.every(
+          (a) => f.app.app.service?.platforms.get(a.id)?.ready,
+        ),
+      5000,
+    );
   };
   await f.login();
   return {

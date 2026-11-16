@@ -12,6 +12,13 @@ import { join } from "node:path";
 import type { Config, Scope } from "./config";
 import { Ownership } from "./ownership";
 import { Fault, need } from "./errors";
+export function isSqliteError(error: unknown) {
+  const code = (error as { code?: unknown } | null)?.code;
+  return (
+    typeof code === "string" &&
+    (code.startsWith("SQLITE_") || code.startsWith("ERR_SQLITE_"))
+  );
+}
 export const opaque = (prefix: string) =>
   prefix + "_" + randomBytes(18).toString("base64url");
 export const digest = (s: string) =>

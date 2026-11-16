@@ -83,10 +83,10 @@ test("extracted CLI retains authenticated management after rejected persisted cr
     f.platform.matrixCredential("owned-corrected-platform-secret");
     child = run("serve");
     const readiness = await child.settingsReady();
-    expect(readiness.ready).toBe(false);
+    expect(readiness.ready).toBe(true);
     expect(readiness.settings_ready).toBe(true);
-    expect(readiness.url).toBeNull();
-    expect(readiness.status.healthy).toBe(false);
+    expect(readiness.url).toBeTruthy();
+    expect(readiness.status.healthy).toBe(true);
     const origin = f.config.settings.origin;
     expect((await fetch(origin + "/api/settings")).status).toBe(401);
     const login = await fetch(origin + "/api/login", {
@@ -104,10 +104,15 @@ test("extracted CLI retains authenticated management after rejected persisted cr
     const view = await (
       await fetch(origin + "/api/settings", { headers })
     ).json();
-    expect(view.state).toBe("failed");
-    expect(view.error).toBe("unavailable");
-    expect(view.machine_url).toBeNull();
-    expect(view.accounts[0].ready).toBe(false);
+    expect(view.state).toBe("applied");
+    expect(view.error).toBeNull();
+    expect(view.machine_url).toBeTruthy();
+    await until(
+      async () =>
+        (await (await fetch(origin + "/api/status", { headers })).json())
+          .accounts[0].state === "needs_attention",
+      5000,
+    );
     const leasePath = join(f.config.data_dir, "owner.lock"),
       lease = await readFile(leasePath, "utf8");
     await expect(Store.open(f.config)).rejects.toThrow();
@@ -137,6 +142,12 @@ test("extracted CLI retains authenticated management after rejected persisted cr
       async () =>
         (await (await fetch(origin + "/api/status", { headers })).json())
           .applied,
+    );
+    await until(
+      async () =>
+        (await (await fetch(origin + "/api/status", { headers })).json())
+          .accounts[0].state === "connected",
+      5000,
     );
     const applied = await (
       await fetch(origin + "/api/settings", { headers })
@@ -171,7 +182,7 @@ test("extracted CLI retains authenticated management after rejected persisted cr
   }
 });
 
-test("settings native failure retains the same Store for retry; missing vault credentials and cancellation remain fatal", async () => {
+test("settings account failures retain Store, report attention, and cancellation drains", async () => {
   const f = await fixture();
   const { provisionAdmin } = await import("../src/admin");
   await provisionAdmin(f.config.settings.admin_file, "owned-recovery-password");
@@ -180,7 +191,13 @@ test("settings native failure retains the same Store for retry; missing vault cr
     f.platform.matrixCredential("owned-corrected-platform-secret");
     await app.start();
     const owner = app.store;
-    expect((await app.view()).state).toBe("failed");
+    expect((await app.view()).state).toBe("applied");
+    await until(
+      () =>
+        app.app.service?.accountStates.get("matrix-main")?.state ===
+        "needs_attention",
+      5000,
+    );
     const saved = await app.save({
       version: app.version,
       accounts: f.config.accounts,
@@ -198,6 +215,10 @@ test("settings native failure retains the same Store for retry; missing vault cr
     expect(saved.saved).toBe(true);
     expect(saved.applied).toBe(false);
     await app.pending;
+    await until(
+      () => app.app.service?.platforms.get("matrix-main")?.ready,
+      5000,
+    );
     expect(app.status().applied).toBe(true);
     expect(app.store).toBe(owner);
     expect(owner.owner.closed).toBe(false);
@@ -206,7 +227,18 @@ test("settings native failure retains the same Store for retry; missing vault cr
     store.db.prepare("DELETE FROM vault WHERE ref=?").run("matrix-secret");
     await store.close();
     app = new Settings(f.path, f.config);
-    await expect(app.start()).rejects.toThrow();
+    await app.start();
+    await until(
+      () =>
+        app.app.service?.accountStates.get("matrix-main")?.state ===
+        "needs_attention",
+      5000,
+    );
+    expect(app.app.service?.accountStates.get("matrix-main")?.reason).toBe(
+      "credential_unavailable",
+    );
+    expect(app.status().ready).toBe(true);
+    await app.stop();
     expect(existsSync(join(f.config.data_dir, "owner.lock"))).toBe(false);
     app = new Settings(f.path, f.config);
     const starting = app.start().catch((e) => e);
