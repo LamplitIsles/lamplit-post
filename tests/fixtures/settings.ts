@@ -10,6 +10,7 @@ import { consumerFixture } from "./consumer";
 import type { startQrConnect } from "@tencent-connect/qqbot-connector";
 import { Store } from "../../src/store";
 import { ConfigSchema, type Config } from "../../src/config";
+import type { TransportFixture } from "../../src/host";
 async function port() {
   const s = createServer();
   await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
@@ -24,6 +25,9 @@ export async function settingsFixture(
   qrLifetime?: number,
   staticRoot?: string,
   configure?: (config: Config) => Config,
+  extraFixture?: TransportFixture,
+  waitForAccounts = true,
+  beforeStart?: (store: Store) => Promise<void>,
 ) {
   const platform = await platformsFixture(),
     receiver = await consumerFixture(false),
@@ -42,7 +46,7 @@ export async function settingsFixture(
   if (!parsed.settings)
     throw new Error("Owned settings fixture requires its management listener");
   const config = { ...parsed, settings: parsed.settings };
-  if (configure) {
+  if (configure || beforeStart) {
     const bootstrap = await Store.open(config);
     try {
       for (const a of config.agents.filter(
@@ -56,6 +60,7 @@ export async function settingsFixture(
         );
         await bootstrap.issue(a.id);
       }
+      await beforeStart?.(bootstrap);
     } finally {
       await bootstrap.close();
     }
@@ -66,13 +71,14 @@ export async function settingsFixture(
   const app = new Settings(path, config, {
     qqOrigin: platform.url,
     qqGateway: platform.gateway,
+    ...extraFixture,
   });
   // Bind before SDK client sockets can consume the selected ephemeral port.
   let web: Awaited<ReturnType<typeof serveSettings>>;
   try {
     web = await serveSettings(app, staticRoot, connector, qrLifetime);
     await app.start();
-    if (!empty)
+    if (!empty && waitForAccounts)
       await until(
         () =>
           config.accounts.every(

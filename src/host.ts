@@ -6,6 +6,8 @@ import { QQBot as QQ } from "@satorijs/adapter-qq";
 import { decodeGroupMessage, type QQBot } from "@satorijs/adapter-qq";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { MatrixUserBot } from "./matrix";
+import { KeetPlatform } from "./keet";
+import type { RuntimeHashes } from "./keet-sidecar";
 import type { Platform, Observation } from "./platform";
 import type { AccountConfig, Scope } from "./config";
 import type { Service } from "./service";
@@ -16,6 +18,7 @@ import { isSqliteError } from "./store";
 export interface TransportFixture {
   qqOrigin?: string;
   qqGateway?: string;
+  keet?: { hashes?: RuntimeHashes; swarming: false };
   /** Test-only retry interval; production configuration cannot set this. */
   recoveryDelayMs?: number;
 }
@@ -88,8 +91,23 @@ export class Host {
     for (const config of this.accounts) {
       this.controller.signal.throwIfAborted();
       this.service.stopSignal.signal.throwIfAborted();
+      if (config.platform === "keet") {
+        const bot = new KeetPlatform(
+          config,
+          this.service,
+          this.fixture.keet,
+          this.controller.signal,
+        );
+        this.nativeBots.add(bot);
+        this.service.platforms.set(config.id, bot);
+        await bot.start();
+        this.controller.signal.throwIfAborted();
+        this.service.stopSignal.signal.throwIfAborted();
+        continue;
+      }
       let secret: string;
       try {
+        need(config.credential, "unavailable");
         secret = await this.service.store.secret(
           config.credential,
           config.id,

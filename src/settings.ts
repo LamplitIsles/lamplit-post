@@ -48,7 +48,8 @@ export class Settings {
       this.store = await Store.open(this.config);
       this.app = new Application(this.config, this.fixture, this.store);
       try {
-        this.validate(this.config);
+        // Keet pins are checked before native startup by its account supervisor.
+        this.validate(this.config, true);
         for (const b of this.config.agents)
           await this.store.secret(b.receiver_credential, b.id, "receiver");
         need(!this.closed, "unavailable");
@@ -170,11 +171,21 @@ export class Settings {
       account_status: this.status().accounts,
       error: this.state === "failed" ? "unavailable" : null,
       machine_url: this.app.http?.url ?? null,
-      accounts: this.config.accounts.map((a) => ({
-        ...a,
-        hasCredential: credential(a.credential, a.id, "platform"),
-        ready: this.app.service?.platforms.get(a.id)?.ready ?? false,
-      })),
+      accounts: this.config.accounts.map((a) => {
+        if (a.platform === "keet")
+          return {
+            id: a.id,
+            platform: a.platform,
+            ...(a.name ? { name: a.name } : {}),
+            hasCredential: true,
+            ready: this.app.service?.platforms.get(a.id)?.ready ?? false,
+          };
+        return {
+          ...a,
+          hasCredential: credential(a.credential!, a.id, "platform"),
+          ready: this.app.service?.platforms.get(a.id)?.ready ?? false,
+        };
+      }),
       agents: this.config.agents.map((b) => ({
         ...b,
         hasCredential: credential(b.receiver_credential, b.id, "receiver"),
@@ -225,7 +236,7 @@ export class Settings {
       ? String(pin.account)
       : proposed;
   }
-  validate(next: Config) {
+  validate(next: Config, deferKeetPins = false) {
     for (const key of Object.keys(this.config).filter(
       (k) => !["accounts", "agents", "bindings"].includes(k),
     ) as (keyof Config)[])
@@ -234,7 +245,7 @@ export class Settings {
         "invalid_request",
       );
     for (const a of next.accounts) {
-      this.validateAccount(a);
+      this.validateAccount(a, deferKeetPins && a.platform === "keet");
       if (this.config.accounts.some((old) => old.id === a.id))
         need(
           accountOwner(next, a.id) === accountOwner(this.config, a.id),
@@ -268,13 +279,13 @@ export class Settings {
       }
   }
   /** Draft verification checks identity, never creates ownership or admission. */
-  validateAccount(a: AccountConfig) {
+  validateAccount(a: AccountConfig, deferPin = false) {
     need(
       !this.config.accounts.some(
         (other) =>
           other.id !== a.id &&
           ((other.platform === a.platform && other.native_id === a.native_id) ||
-            other.credential === a.credential),
+            (!!a.credential && other.credential === a.credential)),
       ) &&
         !this.config.agents.some(
           (agent) => agent.receiver_credential === a.credential,
@@ -282,25 +293,28 @@ export class Settings {
         a.credential !== "__keycheck",
       "conflict",
     );
-    const rows = this.store.db
-      .prepare(
-        "SELECT * FROM identities WHERE account=? OR (platform=? AND native=?)",
-      )
-      .all(a.id, a.platform, a.native_id);
-    for (const r of rows)
-      need(
-        r.account === a.id &&
-          r.platform === a.platform &&
-          r.native === a.native_id,
-        "conflict",
-      );
+    if (!deferPin) {
+      const rows = this.store.db
+        .prepare(
+          "SELECT * FROM identities WHERE account=? OR (platform=? AND native=?)",
+        )
+        .all(a.id, a.platform, a.native_id);
+      for (const r of rows)
+        need(
+          r.account === a.id &&
+            r.platform === a.platform &&
+            r.native === a.native_id,
+          "conflict",
+        );
+    }
     const old = this.config.accounts.find((o) => o.id === a.id);
     if (old)
       need(
         old.platform === a.platform &&
           old.native_id === a.native_id &&
           old.homeserver === a.homeserver &&
-          old.credential === a.credential,
+          old.credential === a.credential &&
+          old.identity_dir === a.identity_dir,
         "conflict",
       );
   }
@@ -341,9 +355,26 @@ export class Settings {
         "invalid_request",
       );
       const raw = parse(original);
+      const rawAccounts = Array.isArray(raw.accounts) ? raw.accounts : [];
+      const accounts = input.accounts.map((a: any) => {
+        if (a?.platform !== "keet") return a;
+        need(
+          Object.keys(a).every((k) => ["id", "platform", "name"].includes(k)),
+          "invalid_request",
+        );
+        const previous = rawAccounts.find(
+          (old: any) => old.id === a.id && old.platform === "keet",
+        ) as any;
+        need(previous, "invalid_request");
+        return {
+          ...a,
+          native_id: previous.native_id,
+          identity_dir: previous.identity_dir,
+        };
+      });
       const nextRaw = {
         ...raw,
-        accounts: input.accounts,
+        accounts,
         agents: input.agents,
         bindings: input.bindings,
       };
@@ -374,7 +405,9 @@ export class Settings {
         );
       }
       for (const [ref, account, kind] of [
-        ...next.accounts.map((a) => [a.credential, a.id, "platform"]),
+        ...next.accounts
+          .filter((a) => a.credential)
+          .map((a) => [a.credential!, a.id, "platform"]),
         ...next.agents.map((b) => [b.receiver_credential, b.id, "receiver"]),
       ]) {
         if (
@@ -385,7 +418,10 @@ export class Settings {
           await this.store.secret(ref, account, kind);
       }
       for (const account of next.accounts)
-        if (!this.config.accounts.some((a) => a.id === account.id))
+        if (
+          account.platform !== "keet" &&
+          !this.config.accounts.some((a) => a.id === account.id)
+        )
           need(
             secrets.some(
               (s) =>
@@ -397,11 +433,34 @@ export class Settings {
           );
       const names = input.conversation_names ?? [];
       need(Array.isArray(names) && names.length <= 1000, "invalid_request");
-      for (const n of names)
+      for (const n of names) {
         need(
           typeof n.name === "string" &&
             n.name.trim().length > 0 &&
-            n.name.length <= 256 &&
+            n.name.length <= 256,
+          "invalid_request",
+        );
+        const keet = next.accounts.some(
+          (a) => a.id === n.account_id && a.platform === "keet",
+        );
+        if (keet) {
+          const row = this.store.db
+            .prepare("SELECT * FROM conversations WHERE account=? AND id=?")
+            .get(n.account_id, n.conversation_id) as any;
+          const platform = this.app.service?.platforms.get(n.account_id);
+          need(row && platform?.ready, "invalid_request");
+          await platform.check(
+            {
+              account_id: n.account_id,
+              conversation_id: row.id,
+              native_id: row.native,
+              type: row.type,
+              senders: [],
+            },
+            this.app.service!.signal(),
+          );
+        } else
+          need(
             next.bindings.some((b) =>
               b.scopes.some(
                 (s) =>
@@ -409,8 +468,9 @@ export class Settings {
                   s.conversation_id === n.conversation_id,
               ),
             ),
-          "invalid_request",
-        );
+            "invalid_request",
+          );
+      }
       const vault = this.store.db.prepare("SELECT * FROM vault").all();
       const previous = this.config;
       const replacement = stringify(nextRaw);
@@ -456,6 +516,18 @@ export class Settings {
           for (const s of secrets)
             this.store.putSecret(s.ref, s.account, s.kind, s.value);
           for (const n of names) {
+            if (
+              next.accounts.some(
+                (a) => a.id === n.account_id && a.platform === "keet",
+              )
+            ) {
+              this.store.db
+                .prepare(
+                  "UPDATE conversations SET name=? WHERE account=? AND id=?",
+                )
+                .run(n.name, n.account_id, n.conversation_id);
+              continue;
+            }
             const scope = next.bindings
               .flatMap((b) => b.scopes)
               .find(

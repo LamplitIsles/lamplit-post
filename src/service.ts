@@ -103,16 +103,83 @@ export class Service {
     );
     return bindings;
   }
-  hasGrants(agent: string) {
-    return this.bindings(agent).some((b) =>
-      b.scopes.some(
-        (s) =>
-          accountOwner(this.config, s.account_id) === agent &&
-          this.admitsConversation(s),
-      ),
+  async hasGrants(agent: string, signal: AbortSignal) {
+    const bindings = this.bindings(agent);
+    if (
+      bindings.some((b) =>
+        b.scopes.some(
+          (s) =>
+            accountOwner(this.config, s.account_id) === agent &&
+            this.config.accounts.some(
+              (a) => a.id === s.account_id && a.platform !== "keet",
+            ) &&
+            this.admitsConversation(s),
+        ),
+      )
+    )
+      return true;
+    const accounts = new Set(
+      bindings
+        .flatMap((b) => b.account_ids)
+        .filter(
+          (id) =>
+            this.config.accounts.some(
+              (a) => a.id === id && a.platform === "keet",
+            ) && accountOwner(this.config, id) === agent,
+        ),
     );
+    let unavailable: unknown;
+    for (const account of accounts) {
+      signal.throwIfAborted();
+      try {
+        const rooms = await this.refreshKeet(account, signal);
+        for (const room of rooms) {
+          const row = this.store.db
+            .prepare(
+              "SELECT id FROM conversations WHERE account=? AND native=? AND type=?",
+            )
+            .get(account, room.native_id, room.type);
+          need(row, "unavailable");
+          try {
+            await this.check(agent, account, String(row.id), signal);
+            return true;
+          } catch (e) {
+            if (!(e instanceof Fault && e.code === "not_found")) {
+              signal.throwIfAborted();
+              unavailable ??= e;
+            }
+          }
+        }
+      } catch (e) {
+        signal.throwIfAborted();
+        unavailable ??= e;
+      }
+    }
+    if (unavailable) throw unavailable;
+    return false;
   }
   scope(agent: string, account: string, conversation: string): Scope {
+    if (
+      this.config.accounts.some(
+        (a) => a.id === account && a.platform === "keet",
+      )
+    ) {
+      const bound =
+        this.bindings(agent).some((b) => b.account_ids.includes(account)) &&
+        accountOwner(this.config, account) === agent;
+      const row = this.store.db
+        .prepare("SELECT * FROM conversations WHERE account=? AND id=?")
+        .get(account, conversation) as unknown as
+        Tables["conversations"] | undefined;
+      need(bound && row);
+      return {
+        account_id: account,
+        conversation_id: row.id,
+        native_id: row.native,
+        type: row.type,
+        senders: [],
+      };
+    }
     const scope = this.bindings(agent)
       .flatMap((b) => b.scopes)
       .find(
@@ -133,6 +200,12 @@ export class Service {
       : s.senders.length > 0;
   }
   admitted(b: Binding, m: MessageV1) {
+    if (m.platform === "keet")
+      return (
+        b.enabled &&
+        b.account_ids.includes(m.account_id) &&
+        accountOwner(this.config, m.account_id) === b.agent_id
+      );
     const s = b.scopes.find(
       (s) =>
         s.account_id === m.account_id &&
@@ -174,10 +247,12 @@ export class Service {
     return result;
   }
   async authorizeAsset(agent: string, id: string, signal: AbortSignal) {
-    need(this.hasGrants(agent));
     const row = await this.assets.row(id);
     need(row);
-    if (row.owner === agent) return this.assets.metadata(id);
+    if (row.owner === agent) {
+      need(await this.hasGrants(agent, signal));
+      return this.assets.metadata(id);
+    }
     for (const m of await this.assetMessages(agent, id)) {
       try {
         await this.check(agent, m.account_id, m.conversation.id, signal);
@@ -192,7 +267,8 @@ export class Service {
     return {
       members:
         this.config.accounts.find((a) => a.id === account)?.platform ===
-        "matrix"
+          "matrix" ||
+        this.config.accounts.find((a) => a.id === account)?.platform === "keet"
           ? "supported"
           : "unsupported",
       history: "observed",
@@ -236,6 +312,12 @@ export class Service {
       this.errors.delete(account);
     if (this.errors.has(account)) throw new Fault("unavailable");
     const a = this.config.accounts.find((a) => a.id === account)!;
+    if (a.platform === "keet" && direction === "inbound") {
+      const platform = this.platforms.get(account);
+      need(platform?.ready && platform.checkObservation, "unavailable");
+      await platform.checkObservation(o, this.signal());
+      need(!this.closed, "unavailable");
+    }
     const diagnostic = a.platform === "qq" && direction === "inbound";
     const summary = {
       bindings: 0,
@@ -288,14 +370,19 @@ export class Service {
           db,
           conv,
           a.platform,
-          created && a.platform === "qq" && direction === "inbound"
+          created &&
+            (a.platform === "qq" || a.platform === "keet") &&
+            direction === "inbound"
             ? conv.type === "direct"
               ? o.name
               : o.conversation_name
             : undefined,
         );
         const native = o.mutation
-          ? o.native_id + ":" + o.mutation
+          ? o.native_id +
+            ":" +
+            o.mutation +
+            (o.mutation_id ? ":" + o.mutation_id : "")
           : o.native_id;
         const duplicate = (
           db
@@ -533,13 +620,36 @@ export class Service {
     this.bindings(agent);
     if (name === "list_accounts") {
       const ids = new Set(
-        this.bindings(agent).flatMap((b) => b.scopes.map((s) => s.account_id)),
+        this.bindings(agent).flatMap((b) => [
+          ...b.scopes.map((s) => s.account_id),
+          ...b.account_ids.filter((id) =>
+            this.config.accounts.some(
+              (a) => a.id === id && a.platform === "keet",
+            ),
+          ),
+        ]),
       );
       return {
         items: this.config.accounts
-          .filter(
-            (a) => ids.has(a.id) && accountOwner(this.config, a.id) === agent,
-          )
+          .filter((a) => {
+            if (!ids.has(a.id) || accountOwner(this.config, a.id) !== agent)
+              return false;
+            if (a.platform !== "keet") return true;
+            const pins = this.store.db
+              .prepare(
+                "SELECT account,platform,native FROM identities WHERE account=? OR (platform=? AND native=?)",
+              )
+              .all(a.id, a.platform, a.native_id);
+            return (
+              pins.length > 0 &&
+              pins.every(
+                (pin) =>
+                  pin.account === a.id &&
+                  pin.platform === a.platform &&
+                  pin.native === a.native_id,
+              )
+            );
+          })
           .map((a) => ({
             account_id: a.id,
             platform: a.platform,
@@ -553,6 +663,17 @@ export class Service {
       return this.authorizeAsset(agent, args.asset_id, signal);
     if (name === "send_message") return this.send(agent, args, signal);
     if (name === "list_conversations") {
+      const keet = this.config.accounts.some(
+        (a) => a.id === args.account_id && a.platform === "keet",
+      );
+      if (keet) {
+        need(
+          this.bindings(agent).some((b) =>
+            b.account_ids.includes(args.account_id),
+          ) && accountOwner(this.config, args.account_id) === agent,
+        );
+        await this.refreshKeet(args.account_id, signal);
+      }
       const scopes = this.bindings(agent)
         .flatMap((b) => b.scopes)
         .filter(
@@ -560,7 +681,7 @@ export class Service {
             s.account_id === args.account_id &&
             accountOwner(this.config, s.account_id) === agent,
         );
-      need(scopes.length);
+      need(keet || scopes.length);
       const query = name + ":" + args.account_id;
       const offset = this.offset(agent, query, args.before);
       const rows = this.store.db
@@ -576,7 +697,7 @@ export class Service {
       let last = 0;
       for (const r of rows) {
         last = r.seq;
-        if (!scopes.some((s) => s.conversation_id === r.id)) continue;
+        if (!keet && !scopes.some((s) => s.conversation_id === r.id)) continue;
         try {
           await this.check(agent, args.account_id, r.id, signal);
         } catch (e) {
@@ -678,6 +799,48 @@ export class Service {
       capabilities: this.capabilities(r.account),
     };
   }
+  async refreshKeet(
+    account: string,
+    signal: AbortSignal,
+    initializing?: Platform,
+  ) {
+    const platform = this.platforms.get(account);
+    need(
+      !this.closed &&
+        platform?.directory &&
+        (platform.ready || platform === initializing),
+      "unavailable",
+    );
+    const entries = await platform.directory(signal);
+    signal.throwIfAborted();
+    need(
+      !this.closed && this.platforms.get(account) === platform,
+      "unavailable",
+    );
+    this.store.transaction((db) => {
+      for (const entry of entries) {
+        let row = db
+          .prepare(
+            "SELECT * FROM conversations WHERE account=? AND native=? AND type=?",
+          )
+          .get(account, entry.native_id, entry.type) as unknown as
+          Tables["conversations"] | undefined;
+        if (!row)
+          row = db
+            .prepare(
+              "INSERT INTO conversations(id,account,native,type) VALUES (?,?,?,?) RETURNING *",
+            )
+            .get(
+              opaque("cnv"),
+              account,
+              entry.native_id,
+              entry.type,
+            ) as unknown as Tables["conversations"];
+        ensureConversationName(db, row, "keet", entry.name);
+      }
+    });
+    return entries;
+  }
   async check(
     agent: string,
     account: string,
@@ -697,8 +860,54 @@ export class Service {
     args: any,
     signal: AbortSignal,
   ) {
+    const keetAccounts = new Set(
+      this.bindings(agent)
+        .flatMap((b) => b.account_ids)
+        .filter(
+          (id) =>
+            this.config.accounts.some(
+              (a) => a.id === id && a.platform === "keet",
+            ) &&
+            (args.account_id === undefined || args.account_id === id) &&
+            (args.platform === undefined || args.platform === "keet"),
+        ),
+    );
+    for (const account of keetAccounts) await this.refreshKeet(account, signal);
     const candidates = () => {
       const found = new Map<string, Scope>();
+      for (const b of this.bindings(agent))
+        for (const accountId of b.account_ids) {
+          const account = this.config.accounts.find(
+            (a) => a.id === accountId && a.platform === "keet",
+          );
+          if (
+            !account ||
+            accountOwner(this.config, accountId) !== agent ||
+            (args.account_id !== undefined && args.account_id !== accountId) ||
+            (args.platform !== undefined && args.platform !== "keet")
+          )
+            continue;
+          const rows = this.store.db
+            .prepare("SELECT * FROM conversations WHERE account=? AND name=?")
+            .all(
+              accountId,
+              args.conversation_name,
+            ) as unknown as Tables["conversations"][];
+          for (const row of rows)
+            if (
+              args.conversation_type === undefined ||
+              args.conversation_type === row.type
+            ) {
+              const scope = {
+                account_id: accountId,
+                conversation_id: row.id,
+                native_id: row.native,
+                type: row.type,
+                senders: [],
+              };
+              found.set(JSON.stringify([accountId, row.id]), scope);
+            }
+        }
       for (const b of this.bindings(agent))
         for (const s of b.scopes) {
           if (
@@ -964,6 +1173,9 @@ export class Service {
       if (part.type === "mention")
         need(scope.type === "group", "invalid_request");
     }
+    await this.platforms
+      .get(scope.account_id)
+      ?.preflight?.(scope, content, reply, signal);
     signal.throwIfAborted();
     const existing = this.store.transaction((db) => {
       const row = (
@@ -1229,6 +1441,13 @@ export class Service {
         consumer.id,
         "receiver",
       );
+      if (m.platform === "keet")
+        await this.check(
+          binding.agent_id,
+          m.account_id,
+          m.conversation.id,
+          this.signal(),
+        );
       const response = await fetch(row.receiver, {
         method: "POST",
         headers: {

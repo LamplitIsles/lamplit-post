@@ -7,6 +7,7 @@ import { Fault, need } from "./errors";
 import { isShareURL } from "./config";
 import { MatrixUserBot } from "./matrix";
 import { QQPlatform } from "./host";
+import { KeetPlatform } from "./keet";
 import QRCode from "qrcode";
 import { ConfigSchema } from "./config";
 import { verifyMatrix } from "./matrix-draft";
@@ -25,13 +26,13 @@ export function shareURL(value: string) {
   need(isShareURL(value), "invalid_request");
   return new URL(value).href;
 }
-async function body(req: IncomingMessage) {
+async function body(req: IncomingMessage, max = 131072) {
   need(req.headers["content-type"] === "application/json", "invalid_request");
   const parts: Buffer[] = [];
   let size = 0;
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += chunk.length;
-    need(size <= 131072, "invalid_request");
+    need(size <= max, "invalid_request");
     parts.push(chunk);
   }
   return JSON.parse(Buffer.concat(parts).toString());
@@ -220,6 +221,99 @@ export async function serveSettings(
             }
             return send(200, result);
           }
+          if (path.startsWith("/api/keet/") && method === "POST") {
+            req.socket.setTimeout(settings.config.timeout_ms + 1000);
+            const input = await body(
+              req,
+              path === "/api/keet/profile/save" ? 11_200_000 : 131072,
+            );
+            return send(
+              200,
+              await settings.serialize(async () => {
+                const allowed: Record<string, string[]> = {
+                  "/api/keet/directory": ["account_id"],
+                  "/api/keet/profile": ["account_id"],
+                  "/api/keet/profile/save": [
+                    "account_id",
+                    "display_name",
+                    "avatar",
+                  ],
+                  "/api/keet/link/inspect": ["account_id", "link"],
+                  "/api/keet/link/join": ["account_id", "link", "target_id"],
+                  "/api/keet/invites/accept": [
+                    "account_id",
+                    "kind",
+                    "room_id",
+                    "peer_id",
+                  ],
+                };
+                need(
+                  input &&
+                    allowed[path] &&
+                    Object.keys(input).every((k) =>
+                      allowed[path]!.includes(k),
+                    ) &&
+                    typeof input.account_id === "string",
+                  "invalid_request",
+                );
+                const service = settings.app.service;
+                const platform = service?.platforms.get(input.account_id);
+                need(
+                  service && platform instanceof KeetPlatform && platform.ready,
+                  "unavailable",
+                );
+                const signal = service.signal(controller.signal);
+                if (path === "/api/keet/directory") {
+                  const rooms = await service.track(
+                    service.refreshKeet(input.account_id, signal),
+                  );
+                  const invites = await service.track(platform.invites(signal));
+                  const items = rooms.map((room) => {
+                    const row = settings.store.db
+                      .prepare(
+                        "SELECT * FROM conversations WHERE account=? AND native=? AND type=?",
+                      )
+                      .get(input.account_id, room.native_id, room.type);
+                    need(row, "unavailable");
+                    return {
+                      conversation_id: row.id,
+                      native_id: room.native_id,
+                      type: room.type,
+                      name: row.name,
+                      writable: room.writable,
+                    };
+                  });
+                  return { items, invites };
+                }
+                if (path === "/api/keet/profile")
+                  return service.track(platform.profile(signal));
+                if (path === "/api/keet/profile/save")
+                  return service.track(platform.saveProfile(input, signal));
+                if (path === "/api/keet/link/inspect")
+                  return service.track(
+                    platform.inspectLink(input.link, signal),
+                  );
+                if (path === "/api/keet/link/join")
+                  return service.track(
+                    platform.joinLink(input.link, input.target_id, signal),
+                  );
+                need(
+                  (input.kind === "group" || input.kind === "direct") &&
+                    typeof input.room_id === "string" &&
+                    typeof input.peer_id === "string",
+                  "invalid_request",
+                );
+                return service.track(
+                  platform.acceptInvite(
+                    input.kind,
+                    input.room_id,
+                    input.peer_id,
+                    signal,
+                  ),
+                );
+              }),
+            );
+          }
           if (path === "/api/matrix/verify" && method === "POST") {
             req.socket.setTimeout(settings.config.timeout_ms + 1000);
             const input = await body(req);
@@ -240,6 +334,10 @@ export async function serveSettings(
                   a.platform === proposed.platform &&
                   a.native_id === proposed.native_id,
               ),
+              "invalid_request",
+            );
+            need(
+              proposed.platform === "matrix" && proposed.credential,
               "invalid_request",
             );
             const account = {
@@ -268,7 +366,7 @@ export async function serveSettings(
             const credential =
               input.credential ??
               (await settings.store.secret(
-                account.credential,
+                account.credential!,
                 account.id,
                 "platform",
               ));

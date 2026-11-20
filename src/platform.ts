@@ -14,6 +14,7 @@ export interface Observation {
   self_mentioned: boolean;
   reply_native_id?: string;
   mutation?: "edit" | "retraction";
+  mutation_id?: string;
   catchup: boolean;
 }
 export interface Platform {
@@ -23,6 +24,24 @@ export interface Platform {
   start(): Promise<void>;
   stop(): Promise<void>;
   check(scope: Scope, signal: AbortSignal): Promise<void>;
+  directory?(signal: AbortSignal): Promise<
+    {
+      native_id: string;
+      type: "direct" | "group";
+      name?: string;
+      writable: boolean;
+    }[]
+  >;
+  checkObservation?(
+    observation: Observation,
+    signal: AbortSignal,
+  ): Promise<void>;
+  preflight?(
+    scope: Scope,
+    content: ContentV1[],
+    reply: MessageV1 | null,
+    signal: AbortSignal,
+  ): Promise<void>;
   members(
     scope: Scope,
     signal: AbortSignal,

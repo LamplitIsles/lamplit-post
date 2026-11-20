@@ -227,7 +227,9 @@ test("settings rejects sharing, orphaning and retained ownership transfer atomic
       account_ids: [],
       scopes: originalScopes,
     });
-    expect(f.app.app.service!.hasGrants(other.id)).toBe(false);
+    expect(
+      await f.app.app.service!.hasGrants(other.id, f.app.app.service!.signal()),
+    ).toBe(false);
     expect.soft((await call(otherToken, "list_accounts")).items).toEqual([]);
     expect
       .soft(

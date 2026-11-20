@@ -4,7 +4,7 @@
 
 ## Language
 
-**IM 账号（Account）**：Post 管理的一个具体平台身份，例如 QQ Bot App 或 Matrix 用户账号。每个配置账号恰好属于一个 agent，由 bindings.account_ids 关联唯一确定。同一所有者可有多个绑定及多个账号（含同平台），不支持跨 agent 共享或保留账号转移。
+**IM 账号（Account）**：Post 管理的一个具体平台身份，例如 QQ Bot App、Matrix 用户账号或 Keet 身份。每个配置账号恰好属于一个 agent，由 bindings.account_ids 关联唯一确定。同一所有者可有多个绑定及多个账号（含同平台），不支持跨 agent 共享或保留账号转移。
 _Avoid_: Agent、登录凭证
 
 **账号连接（Account connection）**：Post 使用平台凭证与 IM 账号建立的连接。取得凭证或保存账号不代表连接已就绪；账号连接就绪也不代表 agent 已获准访问任何聊天。
@@ -30,6 +30,9 @@ _Avoid_: Agent token、平台凭证、全局共享密钥
 
 **Agent 绑定（Agent binding）**：一个 agent 消费者与可访问的 IM 账号、会话、接纳规则及唤醒规则之间的授权关系。绑定可以关联尚未授予聊天权限的账号，account_ids 同时保留账号所有权，清空聊天不会释放账号；多个 IM 来源可以使用同一个消费者连接与 agent session。
 _Avoid_: 每平台一个 agent、平台登录身份
+
+**Keet 成员资格（Keet membership）**：启用绑定后，专用 Keet 身份当前能读取的已加入房间和已接受私聊，直接形成该 agent 的访问范围。从其他设备加入同样生效。退出或撤销成员资格会撤销访问。待接受邀请本身不授予权限，私聊只接纳该会话对应的联系人。
+_Avoid_: 单独的房间授权名单、唤醒规则
 
 **消息接纳（Admission）**：决定某条消息是否允许向指定 agent 提供正文、附件及上下文的策略判断。Post 观测或归档消息本身不代表接纳；agent 读取历史、访问媒体或发送消息仍须具备相应授权。接纳与是否立即唤醒是不同决定。
 _Avoid_: 已唤醒、已授权执行动作

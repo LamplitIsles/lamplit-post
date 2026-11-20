@@ -87,7 +87,7 @@ request. Leaving an existing-account replacement blank uses its vaulted credenti
 server-side. Cancel discards the draft. Verification/listing share one configured
 operation deadline and retire all request I/O before releasing ownership.
 
-After the account connection is ready, find chats and explicitly save selected grants
+For QQ and Matrix, after the account connection is ready, find chats and explicitly save selected grants
 and wake rules. A first save can associate an account with its agent with an empty
 chat scope; leaving after a successful apply retains the account without granting chats.
 When editing an existing account, preserve its saved scopes and wake rules until the
@@ -104,6 +104,20 @@ ID admission; Matrix semantics are unchanged. Room visibility is not an agent gr
 agent; chat bindings never ask for them. Edit the consumer connection outside the
 chat wizard; a blank secret preserves the existing one. Cancelling discards the draft. Required inputs remain scrollable on short
 normal-zoom desktop/mobile viewports, without a footer painted over them.
+
+For an existing Keet account configured on the host, open **管理 Keet** on its
+binding. **Keet 邀请** has pending room invitations and direct-message requests,
+and accepts a pasted Keet room invitation link. Confirm the exact invitation.
+For an unresolved join, query that invitation's status again. **已加入的聊天**
+shows current membership and lets the administrator edit the selectable Post
+conversation name. Joining from another device counts as membership too. An
+enabled binding admits the current rooms and accepted DMs, while a paused
+binding still lets the administrator manage the identity.
+
+In **Keet 资料**, edit the Keet nickname or select a PNG, JPEG, or WebP image up
+to 8 MiB and preview it before saving. A new avatar needs a Keet nickname. The
+saved profile is read back from Keet. See [Keet setup](keet.md) for the host
+runtime and identity configuration.
 
 Save first validates optimistic version, references and immutable pins, closes old
 intake and retires actual old I/O. Only then does it update the sealed vault and

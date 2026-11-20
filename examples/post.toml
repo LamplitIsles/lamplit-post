@@ -6,6 +6,8 @@ port = 18787
 max_asset_bytes = 16777216
 timeout_ms = 30000
 backlog_limit = 10000
+# Optional: privately prepared Keet 4.26.3 runtime; see docs/keet.md.
+# keet_runtime_dir = "/opt/keet/4.26.3/resources/app"
 
 [[accounts]]
 id = "qq-main"
@@ -19,6 +21,14 @@ platform = "matrix"
 native_id = "@post:example.org"
 homeserver = "https://matrix.example.org"
 credential = "matrix-platform"
+
+# Provision the identity on the host; add "keet-main" to exactly one binding's
+# account_ids and do not add Keet scopes. Update strict consumers first.
+# [[accounts]]
+# id = "keet-main"
+# platform = "keet"
+# native_id = "REPLACE_WITH_KEET_MEMBER_ID"
+# identity_dir = "/var/lib/lamplit-post-keet/identity"
 
 [[agents]]
 id = "cfl"

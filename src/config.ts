@@ -46,6 +46,7 @@ const scope = z
 export const ConfigSchema = z
   .object({
     data_dir: z.string().min(1),
+    keet_runtime_dir: z.string().min(1).optional(),
     master_key_file: z.string().min(1),
     hostname: z.literal("127.0.0.1").default("127.0.0.1"),
     port: z.number().int().min(0).max(65535).default(8787),
@@ -69,8 +70,9 @@ export const ConfigSchema = z
       z
         .object({
           id,
-          platform: z.enum(["qq", "matrix"]),
-          credential: ref,
+          platform: z.enum(["qq", "matrix", "keet"]),
+          credential: ref.optional(),
+          identity_dir: z.string().min(1).optional(),
           native_id: z.string().min(1),
           homeserver: url.optional(),
           name: z.string().min(1).max(128).optional(),
@@ -78,6 +80,18 @@ export const ConfigSchema = z
         })
         .strict()
         .superRefine((v, c) => {
+          if (
+            v.platform === "keet"
+              ? !v.identity_dir ||
+                !!v.credential ||
+                !!v.homeserver ||
+                !!v.share_url
+              : !v.credential || !!v.identity_dir
+          )
+            c.addIssue({
+              code: "custom",
+              message: "Invalid platform credentials or identity directory",
+            });
           if (v.platform === "matrix" && !v.homeserver)
             c.addIssue({
               code: "custom",
@@ -144,8 +158,34 @@ export const ConfigSchema = z
         .size !== v.accounts.length
     )
       c.addIssue({ code: "custom", message: "Duplicate platform identity" });
+    if (v.accounts.some((a) => a.platform === "keet") && !v.keet_runtime_dir)
+      c.addIssue({
+        code: "custom",
+        message: "Keet runtime directory required",
+      });
+    if (
+      new Set(
+        v.accounts
+          .filter((a) => a.platform === "keet")
+          .map((a) => a.identity_dir),
+      ).size !== v.accounts.filter((a) => a.platform === "keet").length
+    )
+      c.addIssue({
+        code: "custom",
+        message: "Keet identity directories must be unique",
+      });
+    for (const a of v.accounts.filter((a) => a.platform === "keet")) {
+      if (
+        v.bindings.filter((b) => b.account_ids.includes(a.id)).length !== 1 ||
+        v.bindings.some((b) => b.scopes.some((s) => s.account_id === a.id))
+      )
+        c.addIssue({
+          code: "custom",
+          message: "Keet requires exactly one binding and no explicit scopes",
+        });
+    }
     const refs = [
-      ...v.accounts.map((a) => a.credential),
+      ...v.accounts.flatMap((a) => (a.credential ? [a.credential] : [])),
       ...v.agents.map((a) => a.receiver_credential),
     ];
     if (refs.includes("__keycheck"))
@@ -228,6 +268,14 @@ export function resolveConfigPaths(raw: Config, base: string): Config {
   const cfg = {
     ...raw,
     data_dir: resolve(base, raw.data_dir),
+    ...(raw.keet_runtime_dir
+      ? { keet_runtime_dir: resolve(base, raw.keet_runtime_dir) }
+      : {}),
+    accounts: raw.accounts.map((a) =>
+      a.identity_dir
+        ? { ...a, identity_dir: resolve(base, a.identity_dir) }
+        : a,
+    ),
     master_key_file: resolve(base, raw.master_key_file),
     ...(raw.settings
       ? {
@@ -238,6 +286,11 @@ export function resolveConfigPaths(raw: Config, base: string): Config {
         }
       : {}),
   };
+  const keetDirs = cfg.accounts.flatMap((a) =>
+    a.identity_dir ? [a.identity_dir] : [],
+  );
+  if (new Set(keetDirs).size !== keetDirs.length)
+    throw new Error("Keet identity directories must be unique");
   if (
     cfg.master_key_file === cfg.data_dir ||
     cfg.master_key_file.startsWith(cfg.data_dir + "/")

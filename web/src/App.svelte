@@ -6,6 +6,7 @@
   import { Switch } from "$lib/components/ui/switch/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
+  import KeetAccount from "./KeetAccount.svelte";
   let logged = $state(false),
     loading = $state(true),
     busy = $state(false),
@@ -63,7 +64,7 @@
     if (!draft) return [];
     const reasons = [];
     if (!selected) reasons.push("请选择或新建 IM 账号");
-    else {
+    else if (selected.platform !== "keet") {
       if (!selected.native_id)
         reasons.push(
           selected.platform === "matrix"
@@ -106,6 +107,8 @@
     registration = $state({ id: "", name: "", receiver_url: "" }),
     registrationSecret = $state("");
   let accountRemoval = $state(null);
+  let keetAccount = $state(null);
+  let keetOpener;
   let removal = $state(null),
     qr = $state(null),
     share = $state(""),
@@ -281,6 +284,7 @@
         );
       if (response.status === 401 && path !== "login") logged = false;
       throw Object.assign(new Error(explain(data.error, path)), {
+        code: data.error,
         uncertain: path === "settings" && response.status >= 500,
       });
     }
@@ -488,6 +492,7 @@
     authorization,
     consumers = state.agents,
     accepted,
+    conversationNames = [],
   ) {
     if (configurationStatus)
       throw new Error("设置状态已变化。请先保留未保存的修改，关闭编辑后刷新。");
@@ -500,15 +505,16 @@
         accounts: accounts.map(cleanAccount),
         agents: consumers.map(cleanBinding),
         bindings: bindings.map(cleanBinding),
-        conversation_names: bindings.flatMap((b) =>
-          b.scopes
-            .filter((s) => s.name)
-            .map((s) => ({
+        conversation_names: [
+          ...bindings.flatMap((b) =>
+            b.scopes.filter((s) => s.name).map((s) => ({
               account_id: s.account_id,
               conversation_id: s.conversation_id,
               name: s.name,
             })),
-        ),
+          ),
+          ...conversationNames,
+        ],
         secrets,
         ...(authorization ? { qq_authorization: authorization } : {}),
       });
@@ -539,6 +545,15 @@
           ? "新设置未生效，已恢复原设置。"
           : "连接未就绪，请检查账号后重试。";
     return result;
+  }
+  async function renameKeetConversation(conversationId, name) {
+    const accountId = keetAccount.id;
+    await save(state.accounts, state.bindings, [], undefined, state.agents, undefined, [{
+      account_id: accountId,
+      conversation_id: conversationId,
+      name,
+    }]);
+    return state.applied && accountStatus(accountId)?.state === "connected";
   }
   function begin(binding) {
     draftSavedVersion = "";
@@ -1041,6 +1056,7 @@
             onclick={() => {
               agent = id;
               oneTime = "";
+              keetAccount = null;
             }}
             ><span class="avatar">{name[0]}</span><span
               ><strong>{name}</strong></span
@@ -1120,7 +1136,8 @@
           <Button
             id="bind"
             disabled={busy || applying}
-            onclick={() => begin(bindings.find((b) => !b.scopes.length))}
+            onclick={() => begin(bindings.find((b) => !b.scopes.length &&
+              !ownedAccounts.some((a) => a.platform === "keet" && b.account_ids.includes(a.id))))}
             >＋ 绑定账号</Button
           >
         </div>
@@ -1149,12 +1166,16 @@
                       state.accounts.find((a) => a.id === accountId)}
                     {@const connectionStatus = accountStatus(accountId)}
                     <div class="account-identity">
-                      <img
-                        src={"/brand/platforms/" + a.platform + ".svg"}
-                        alt={a.platform}
-                        width="30"
-                        height="30"
-                      />
+                      {#if a.platform === "keet"}
+                        <Badge variant="outline">Keet</Badge>
+                      {:else}
+                        <img
+                          src={"/brand/platforms/" + a.platform + ".svg"}
+                          alt={a.platform}
+                          width="30"
+                          height="30"
+                        />
+                      {/if}
                       <div>
                         <h3>{a.name || a.id}</h3>
                         <small
@@ -1174,7 +1195,9 @@
                       <Badge variant="secondary"
                         >{b.enabled
                           ? consumer?.hasToken
-                            ? b.scopes.some((s) => s.account_id === accountId && scopeAuthorized(s))
+                            ? a.platform === "keet"
+                              ? "按成员资格授权"
+                              : b.scopes.some((s) => s.account_id === accountId && scopeAuthorized(s))
                               ? "已授权聊天"
                               : "未授权聊天"
                             : "待连接消费者"
@@ -1183,11 +1206,28 @@
                     </div>{/each}
                 </div>
               </div>
+              {#each ownedAccounts.filter((a) => a.platform === "keet" && b.account_ids.includes(a.id)) as a (a.id)}
+                <div class="actions">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy || applying || !!configurationStatus}
+                    onclick={(event) => {
+                      keetOpener = event.currentTarget;
+                      keetAccount = a;
+                    }}
+                    >管理 Keet · {a.name || a.id}</Button
+                  >
+                </div>
+              {/each}
               <details class="binding-details">
                 <summary>详情与编辑</summary>
                 <dl>
                   <dt>聊天范围</dt>
                   <dd>
+                    {#if ownedAccounts.some((a) => a.platform === "keet" && b.account_ids.includes(a.id))}
+                      <span>Keet 已加入的房间和已接受的私聊</span>
+                    {/if}
                     {b.scopes.map(scopeLabel).join("、")}
                   </dd>
                   <dt>会唤醒</dt>
@@ -1199,7 +1239,8 @@
                         (id) =>
                           state.accounts.find((a) => a.id === id)?.native_id,
                       )
-                      .join("、")}
+                      .filter(Boolean)
+                      .join("、") || "—"}
                   </dd>
                   <dt>聊天标识</dt>
                   <dd>{b.scopes.map((s) => s.native_id).join("、") || "无"}</dd>
@@ -1223,18 +1264,19 @@
                           ),
                         ),
                       )}>{b.enabled ? "暂停绑定" : "恢复绑定"}</Button
-                  ><Button
+                  >
+                  {#if b.scopes.length || !ownedAccounts.some((a) => a.platform === "keet" && b.account_ids.includes(a.id))}<Button
                     variant="ghost"
                     size="sm"
                     onclick={() => {
                       removal = b;
                     }}>撤销聊天授权</Button
-                  >{#each state.accounts.filter((a) => a.platform === "qq" && b.account_ids.includes(a.id)) as a}<Button
+                  >{/if}{#each state.accounts.filter((a) => a.platform === "qq" && b.account_ids.includes(a.id)) as a}<Button
                       variant="ghost"
                       size="sm"
                       onclick={() => showQR(a)}>添加机器人</Button
                     >{/each}
-                  {#each ownedAccounts.filter( (a) => b.account_ids.includes(a.id) ) as a}<Button
+                  {#each ownedAccounts.filter( (a) => a.platform !== "keet" && b.account_ids.includes(a.id) ) as a}<Button
                       variant="ghost"
                       size="sm"
                       onclick={() => {
@@ -1299,6 +1341,23 @@
   </div>
 {/if}
 
+{#if logged && keetAccount}
+  {#key keetAccount.id}
+    <KeetAccount
+      account={keetAccount}
+      enabled={bindings.some((b) => b.enabled && b.account_ids.includes(keetAccount.id))}
+      {applying}
+      {configurationStatus}
+      {api}
+      rename={renameKeetConversation}
+      close={() => {
+        keetAccount = null;
+        requestAnimationFrame(() => keetOpener?.focus());
+      }}
+    />
+  {/key}
+{/if}
+
 <Dialog.Root
   bind:open
   onOpenChange={(value) => {
@@ -1313,7 +1372,9 @@
   ><Dialog.Content class="binding-dialog" showCloseButton={false}
     ><Dialog.Header
       ><Dialog.Title
-        >{["连接账号", "查找聊天", "授权聊天", "确认授权"][
+        >{(selected?.platform === "keet"
+          ? ["连接账号", "聊天范围", "唤醒规则", "确认绑定"]
+          : ["连接账号", "查找聊天", "授权聊天", "确认授权"])[
           step
         ]}</Dialog.Title
       ><Dialog.Description
@@ -1325,13 +1386,15 @@
               : "当前设置状态无法确认，请保留未保存的修改。"
           : draftSavedVersion
           ? "设置已保存，正在连接。关闭不会撤销此次保存。"
-          : step > 0
+          : selected?.platform === "keet"
+            ? "此账号可访问的 Keet 聊天由当前成员资格决定。"
+            : step > 0
             ? "账号已保存。聊天授权需另行保存；离开不会撤销账号。"
             : `为 ${agent} 连接账号 · 已有聊天授权保持不变`}</Dialog.Description
       ></Dialog.Header
     >
     <ol class="stepper" aria-label="绑定步骤">
-      {#each ["连接账号", "查找聊天", "授权聊天"] as title, i}<li
+      {#each (selected?.platform === "keet" ? ["连接账号", "聊天范围", "唤醒规则"] : ["连接账号", "查找聊天", "授权聊天"]) as title, i}<li
           class:current={Math.min(step, 2) === i}
           aria-current={Math.min(step, 2) === i ? "step" : undefined}
         >
@@ -1341,15 +1404,17 @@
     </ol>
     {#if draft}<div class="editor-body">
         {#if step === 0}<p class="hint">
-            先保存并连接账号，再查找和授权聊天。账号只供此 agent 使用。
+            {selected?.platform === "keet"
+              ? "此 Keet 账号仅供当前 agent 使用。"
+              : "先保存并连接账号，再查找和授权聊天。账号只供此 agent 使用。"}
           </p>
-          {#each ownedAccounts as a}<button
+          {#each ownedAccounts.filter((a) => a.platform !== "keet" || draft.account_ids.includes(a.id)) as a}<button
               class="account-choice"
               class:selected={selected?.id === a.id}
               onclick={() => choose(a)}
               ><span
                 ><strong>{a.name || a.id}</strong><small
-                  >{a.platform} · {a.native_id}</small
+                  >{a.platform}{a.native_id ? " · " + a.native_id : ""}</small
                 ></span
               ><Badge variant="outline">{accountStateLabel(a.id)}</Badge
               ></button
@@ -1357,7 +1422,7 @@
             >＋ 新建账号</Button
           >
           {#if selected}<div class="field">
-              <label for="account-name">账号名称</label><Input
+              <label for="account-name">{selected.platform === "keet" ? "Post 中的账号名称" : "账号名称"}</label><Input
                 id="account-name"
                 bind:value={selected.name}
               />
@@ -1437,10 +1502,12 @@
                       type="url"
                       bind:value={selected.homeserver}
                     />
-                  </div>{/if}{/if}{:else}<small
+                  </div>{/if}{/if}{:else if selected.platform === "keet"}<small
+                >Keet 身份在主机配置。头像和昵称可在「管理 Keet」中修改。</small
+              >{:else}<small
                 >已使用的账号身份不能修改。凭据替换会重新连接此账号。</small
               >{/if}
-            {#if selected.platform === "matrix" || !newAccount || manualQQ}<div
+            {#if selected.platform !== "keet" && (selected.platform === "matrix" || !newAccount || manualQQ)}<div
                 class="field"
               >
                 <label for="credential"
@@ -1477,6 +1544,9 @@
                 </p>
               </div>{/if}
           {/if}
+        {:else if step === 1 && selected.platform === "keet"}
+          <p class="callout">绑定启用后，已加入的 Keet 房间和已接受的私聊会向此 agent 开放。</p>
+          <p class="hint">可在「管理 Keet」处理邀请并查看当前聊天。</p>
         {:else if step === 1}<p class="hint">
             {accountStatus(selected?.id)?.state === "connected"
               ? "账号已连接。查找聊天并选择要授权给此 agent 的范围。"
@@ -1629,12 +1699,13 @@
             /><small>文本别名不是平台原生提及。</small>
           </div>
         {:else}<h3>{selected.name || selected.id}</h3>
-          <p>{selected.platform} · {selected.native_id}</p>
+          <p>{selected.platform}{selected.native_id ? " · " + selected.native_id : ""}</p>
           <dl>
             <dt>授权聊天</dt>
             <dd>
+              {#if selected.platform === "keet"}已加入的房间和已接受的私聊{/if}
               {draft.scopes.map(scopeLabel).join("、") ||
-                "无授权聊天"}
+                (selected.platform === "keet" ? "" : "无授权聊天")}
               <small>{draft.scopes.map((s) => s.native_id).join("、")}</small>
             </dd>
             <dt>唤醒</dt>
@@ -1645,11 +1716,13 @@
               })}
             </dd>
             <dt>生效方式</dt>
-            <dd>保存后，选中的聊天才会获得授权。</dd>
+            <dd>{selected.platform === "keet"
+              ? "启用此绑定后，Keet 聊天权限随成员资格更新。"
+              : "保存后，选中的聊天才会获得授权。"}</dd>
           </dl>
-          <p class="callout">
+          {#if selected.platform !== "keet"}<p class="callout">
             账号仅供此 agent 使用。未选聊天不会获得访问权。
-          </p>{/if}
+          </p>{/if}{/if}
         {#if error}<p role="alert">{error}</p>{/if}
         {#if saveUnknown}<Button
             variant="outline"
@@ -1688,7 +1761,7 @@
                 : step === 0
                   ? "保存并连接"
                   : step === 3
-                    ? "保存聊天授权"
+                    ? selected?.platform === "keet" ? "保存绑定" : "保存聊天授权"
                     : "下一步"}</Button
           >
         </div></Dialog.Footer

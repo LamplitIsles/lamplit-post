@@ -1,6 +1,7 @@
 import { test, expect } from "vitest";
 import {
   PostEventV1,
+  Account,
   ToolInputs,
   ToolOutputs,
   ToolError,
@@ -10,6 +11,11 @@ import examples from "../contracts/v1/examples.json";
 import { consumerFixture } from "./fixtures/consumer";
 test("canonical examples validate all seven tool contracts and assets", () => {
   PostEventV1.parse(examples.event);
+  PostEventV1.parse(examples.keet_event);
+  Account.parse(examples.keet_account);
+  for (const name of ["get_conversation", "list_members", "read_messages", "send_message"] as const) {
+    ToolInputs[name].parse({ ...examples.tools[name].arguments, platform: "keet" });
+  }
   Asset.parse(examples.upload.result);
   ToolError.parse(examples.error);
   for (const name of Object.keys(ToolInputs) as (keyof typeof ToolInputs)[]) {

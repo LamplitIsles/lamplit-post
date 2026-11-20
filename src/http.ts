@@ -214,7 +214,8 @@ export async function serve(service: Service) {
         }
       }
       if (path === "/assets" && req.method === "POST") {
-        if (!service.hasGrants(agent))
+        const signal = service.signal(req.signal);
+        if (!(await service.hasGrants(agent, signal)))
           return new Response(null, {
             status: 403,
             headers: { Connection: "close" },
@@ -225,7 +226,7 @@ export async function serve(service: Service) {
             req.headers.get("content-type")?.split(";")[0] ?? "",
             req.headers.get("x-post-filename") ?? "attachment",
             agent,
-            service.signal(req.signal),
+            signal,
           );
           return Response.json(meta, { status: 201 });
         } catch (e) {

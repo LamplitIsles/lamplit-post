@@ -148,7 +148,7 @@ test.skipIf(!process.env.POST_BROWSER_CHECK)(
       expect(scans).toBe(1);
       const account = f.app.config.accounts[0];
       expect(
-        await f.app.store.secret(account.credential, account.id, "platform"),
+        await f.app.store.secret(account.credential!, account.id, "platform"),
       ).toBe("owned-retry-browser-credential");
       expect(
         f.platform.calls

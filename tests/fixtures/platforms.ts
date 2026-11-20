@@ -158,14 +158,12 @@ export async function platformsFixture(matrixIdentity = "@post:fixture") {
         );
       if (stall)
         return new Promise<Response>((resolve) => {
-          req.signal.addEventListener(
-            "abort",
-            () => {
-              aborts++;
-              resolve(new Response(null, { status: 499 }));
-            },
-            { once: true },
-          );
+          const aborted = () => {
+            aborts++;
+            resolve(new Response(null, { status: 499 }));
+          };
+          if (req.signal.aborted) aborted();
+          else req.signal.addEventListener("abort", aborted, { once: true });
         });
       if (drip)
         return new Response(

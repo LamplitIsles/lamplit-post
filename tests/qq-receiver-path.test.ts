@@ -110,7 +110,16 @@ test("real QQ group mention and private SDK observations honor grants and reach 
             Number(r.attempt) >= 1,
         ).length === 1 &&
         ledger().filter((r) => r.state === "pending").length === 2 &&
-        rejected.length > 0,
+        rejected.length > 0 &&
+        lines.some((line) => {
+          const record = JSON.parse(line);
+          return (
+            record.event === "qq_inbound" &&
+            record.stage === "receiver" &&
+            record.category === "http_rejected" &&
+            record.http_status === 422
+          );
+        }),
     );
     expect(rejected.every((r) => r.authenticated && r.status === 422)).toBe(
       true,

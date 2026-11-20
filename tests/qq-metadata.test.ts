@@ -105,6 +105,13 @@ test("QQ discovery preserves the stored group name when upstream metadata change
       ],
     });
     expect(saved.status).toBe(200);
+    await until(async () => {
+      const status = await (await f.request("status")).json();
+      return status.accounts.some(
+        (account: any) =>
+          account.account_id === "qq-main" && account.state === "connected",
+      );
+    }, 5000);
     f.platform.qqGroupName("qq-group", "Another platform name");
     const after = await (
       await f.request("discover", { account_id: "qq-main" })

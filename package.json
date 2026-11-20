@@ -20,11 +20,15 @@
     "@tencent-connect/qqbot-connector": "1.2.0",
     "cosmokit": "1.8.1",
     "file-type": "^22.2.0",
+    "fs-native-extensions": "1.5.1",
     "matrix-js-sdk": "44.0.0",
     "patch-package": "8.0.1",
     "qrcode": "^1.5.4",
+    "sharp": "0.35.5",
     "smol-toml": "1.6.0",
+    "tiny-buffer-rpc": "2.4.0",
     "ws": "^8.22.0",
+    "z32": "1.1.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

@@ -5,16 +5,18 @@ import type { Tables } from "./models";
 export function ensureConversationName(
   db: DatabaseSync,
   row: Pick<Tables["conversations"], "seq" | "id" | "type" | "name">,
-  platform: "qq" | "matrix",
+  platform: "qq" | "matrix" | "keet",
   initial?: string,
 ) {
   if (!row.name?.trim()) {
     const name =
       initial?.trim().slice(0, 256) ||
-      `${platform === "qq" ? "QQ" : "Matrix"} ${row.type === "direct" ? "私聊" : "群聊"} ${row.seq}`;
-    db.prepare(
-      "UPDATE conversations SET name=? WHERE id=? AND name IS ?",
-    ).run(name, row.id, row.name);
+      `${platform === "qq" ? "QQ" : platform === "matrix" ? "Matrix" : "Keet"} ${row.type === "direct" ? "私聊" : "群聊"} ${row.seq}`;
+    db.prepare("UPDATE conversations SET name=? WHERE id=? AND name IS ?").run(
+      name,
+      row.id,
+      row.name,
+    );
     row.name = db
       .prepare("SELECT name FROM conversations WHERE id=?")
       .get(row.id)!.name as string;

@@ -117,3 +117,14 @@ satori_patch_sha256 while preserving the existing Matrix patch hash, and the art
 manifest inventories actual patched dependency bytes. Satori remains MIT licensed.
 Upstream repository: https://github.com/satorijs/satori (pinned installed4.6.0
 includes src/adapter.ts).
+
+## Keet sidecar protocol
+
+The framed tiny-buffer-rpc and persistent `.keet-sidecar.lock` approach in
+`src/keet-sidecar.ts` is adapted from keet-for-agent commit
+f6e8c57c0b8ef8bb6f19015731b2124e70f95a10, Apache-2.0; the upstream license is included at
+[licenses/keet-for-agent-APACHE-2.0.txt](licenses/keet-for-agent-APACHE-2.0.txt). Post uses its own bounded IPC and the
+4.26.4 opcode and version tuple. `tiny-buffer-rpc` 2.4.0 and
+`fs-native-extensions` 1.5.1 are normal packaged dependencies; their own
+licenses and native prebuilds ship with their installed package resources.
+The proprietary Keet runtime and identity are not packaged.
