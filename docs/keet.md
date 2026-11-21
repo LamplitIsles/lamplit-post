@@ -1,7 +1,8 @@
 # Keet runtime and accounts
 
 Post supports the official Linux x64 Keet 4.26.3 application and Core 4.26.4
-Production ABI min/max 40, autoupgrade 37. The official executable, bundle,
+Production ABI min/max 40. Core's autoupgrade value varies with its configuration
+and is not a pinned RPC compatibility value. The official executable, bundle,
 addons and identities are operator-supplied and are not included in the Post
 artifact. Post does not update them. Use a private, independently prepared
 identity directory per account; Core may upgrade an identity when opened.

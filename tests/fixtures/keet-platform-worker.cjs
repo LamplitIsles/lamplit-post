@@ -64,22 +64,30 @@ const call = (id) => async (args) => {
       roomId: args[0],
       status: {
         isReadable: room.readable,
-        isWritable: room.writable,
+        isWritable: room.malformed ? null : room.writable,
         isRemoved: room.removed,
       },
       config: { roomType: room.type, title: room.name },
       dmMemberId: room.peer || null,
-      self: {
-        member: {
-          memberId: s.member,
-          status: {
-            isActive: !room.removed,
-            isRemoved: room.removed,
-            isPending: false,
-            isBanned: false,
-          },
-        },
-      },
+      ...(room.missingSelf === "no-self"
+        ? {}
+        : {
+            self: room.missingSelf
+              ? room.missingSelf === "absent"
+                ? {}
+                : { member: null }
+              : {
+                  member: {
+                    memberId: s.member,
+                    status: {
+                      isActive: !room.removed,
+                      isRemoved: room.removed,
+                      isPending: false,
+                      isBanned: false,
+                    },
+                  },
+                },
+          }),
     };
   }
   if (id === 66)

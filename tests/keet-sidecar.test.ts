@@ -41,6 +41,49 @@ async function fixture() {
   return { root, runtime, identity, hashes };
 }
 
+test.each([
+  ["fresh configuration", { abi: { min: 40, max: 40, autoupgrade: 37 } }, true],
+  [
+    "cached configuration",
+    { abi: { min: 40, max: 40, autoupgrade: 39 } },
+    true,
+  ],
+  ["wrong Core", { modules: { "keet-core": "4.26.5" } }, false],
+  ["wrong build", { buildType: "Development" }, false],
+  ["wrong ABI minimum", { abi: { min: 39, max: 40, autoupgrade: 37 } }, false],
+  ["wrong ABI maximum", { abi: { min: 40, max: 41, autoupgrade: 37 } }, false],
+])(
+  "sidecar checks the pinned runtime with %s",
+  async (_name, version, accepted) => {
+    const f = await fixture();
+    const sidecar = new KeetSidecar(
+      f.runtime,
+      f.identity,
+      1000,
+      false,
+      f.hashes,
+    );
+    try {
+      await writeFile(
+        join(f.identity, "version.json"),
+        JSON.stringify(version),
+      );
+      if (accepted) {
+        await sidecar.start();
+        expect(await sidecar.call(6, [])).toEqual({ memberId: "test-member" });
+      } else {
+        await expect(sidecar.start()).rejects.toThrow(
+          "Keet runtime unavailable",
+        );
+        expect(sidecar.active).toBe(false);
+      }
+    } finally {
+      await sidecar.stop();
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);
+
 test("sidecar enforces identity ownership and releases it after native retirement", async () => {
   const f = await fixture();
   const first = new KeetSidecar(f.runtime, f.identity, 1000, false, f.hashes);

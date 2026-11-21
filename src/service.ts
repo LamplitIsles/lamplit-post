@@ -10,7 +10,7 @@ import {
   isSqliteError,
 } from "./store";
 import { Assets } from "./assets";
-import { Fault, need } from "./errors";
+import { Fault, need, UnconfirmedKeetMembership } from "./errors";
 import { ensureConversationName } from "./conversation-name";
 import type { Observation, Platform } from "./platform";
 import {
@@ -701,7 +701,11 @@ export class Service {
         try {
           await this.check(agent, args.account_id, r.id, signal);
         } catch (e) {
-          if (e instanceof Fault && e.code === "not_found") continue;
+          if (
+            e instanceof UnconfirmedKeetMembership ||
+            (e instanceof Fault && e.code === "not_found")
+          )
+            continue;
           throw e;
         }
         items.push(this.conversation(r));

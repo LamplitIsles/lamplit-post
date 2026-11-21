@@ -18,6 +18,11 @@ const response = (id) => async (args) => {
       modules: { "keet-core": "4.26.4" },
       buildType: "Production",
       abi: { min: 40, max: 40, autoupgrade: 37 },
+      ...JSON.parse(
+        fs.existsSync(process.argv[2] + "/version.json")
+          ? fs.readFileSync(process.argv[2] + "/version.json", "utf8")
+          : "{}",
+      ),
     };
   if (id === 6) return { memberId: "test-member" };
   if (id === 39) {

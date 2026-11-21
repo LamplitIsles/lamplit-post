@@ -66,6 +66,14 @@ test("Keet management and MCP use current membership and exact invitation target
         removed: false,
         name: "Fixture Room",
       },
+      unverified: {
+        type: "0",
+        readable: true,
+        writable: true,
+        removed: false,
+        missingSelf: true,
+        name: "Unverified Room",
+      },
     },
     invites: [
       { kind: "direct", room: "dm", peer: "peer", name: "Peer" },
@@ -151,6 +159,20 @@ test("Keet management and MCP use current membership and exact invitation target
         ],
       }),
       { keet: { hashes, swarming: false } },
+      true,
+      async (store) => {
+        store.db
+          .prepare(
+            "INSERT INTO conversations(id,account,native,type,name) VALUES (?,?,?,?,?)",
+          )
+          .run(
+            "stored-unverified",
+            "keet-main",
+            "unverified",
+            "group",
+            "Unverified Room",
+          );
+      },
     );
     expect(
       (await f.request("keet/profile", { account_id: "keet-main" })).status,
@@ -433,6 +455,68 @@ test("Keet management and MCP use current membership and exact invitation target
       });
       return (await response.json()).result;
     };
+    const listKeet = () =>
+      machine("list_conversations", { account_id: "keet-main" });
+    const directory = await (
+      await f.request("keet/directory", { account_id: "keet-main" })
+    ).json();
+    expect(directory.items.map((room: any) => room.native_id)).toContain(
+      "room",
+    );
+    expect(directory.items.map((room: any) => room.native_id)).not.toContain(
+      "unverified",
+    );
+    let rooms = await listKeet();
+    expect(
+      rooms.structuredContent.items.map((item: any) => item.name),
+    ).toContain("Fixture Room");
+    expect(
+      rooms.structuredContent.items.map((item: any) => item.name),
+    ).not.toContain("Unverified Room");
+    await expect(
+      f.app.app.service!.check(
+        "cfl",
+        "keet-main",
+        "stored-unverified",
+        f.app.app.service!.signal(),
+      ),
+    ).rejects.toMatchObject({ code: "unavailable" });
+    native = JSON.parse(await readFile(file, "utf8"));
+    native.rooms.unverified.missingSelf = "absent";
+    await save();
+    rooms = await listKeet();
+    expect(
+      rooms.structuredContent.items.map((item: any) => item.name),
+    ).not.toContain("Unverified Room");
+    native.rooms.unverified.missingSelf = "no-self";
+    await save();
+    expect(await listKeet()).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "unavailable" } },
+    });
+    native.rooms.unverified.missingSelf = true;
+    native.rooms.unverified.malformed = true;
+    await save();
+    expect(await listKeet()).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "unavailable" } },
+    });
+    delete native.rooms.unverified.malformed;
+    native.fail = 39;
+    await save();
+    expect(await listKeet()).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: "unavailable" } },
+    });
+    delete native.fail;
+    native.rooms.unverified.missingSelf = false;
+    await save();
+    rooms = await listKeet();
+    expect(
+      rooms.structuredContent.items.map((item: any) => item.name),
+    ).toContain("Unverified Room");
+    native.rooms.unverified.missingSelf = true;
+    await save();
     const secondToken = (
       await (
         await f.request("token", { agent_id: "second", action: "issue" })
@@ -732,9 +816,22 @@ test("Keet management and MCP use current membership and exact invitation target
       structuredContent: { error: { code: "not_found" } },
     });
     native.invites = [];
-    native.fail = 39;
+    native.rooms.room.missingSelf = true;
     await save();
     const attempts = f.receiver.attempts.length;
+    f.app.store.db
+      .prepare("UPDATE deliveries SET state='pending',due=0 WHERE id=?")
+      .run(event.delivery_id);
+    await f.app.app.service!.dispatch(f.app.config.bindings[0]);
+    expect(
+      f.app.store.db
+        .prepare("SELECT state FROM deliveries WHERE id=?")
+        .get(event.delivery_id)?.state,
+    ).toBe("pending");
+    expect(f.receiver.attempts).toHaveLength(attempts);
+    delete native.rooms.room.missingSelf;
+    native.fail = 39;
+    await save();
     f.app.store.db
       .prepare("UPDATE deliveries SET state='pending',due=0 WHERE id=?")
       .run(event.delivery_id);

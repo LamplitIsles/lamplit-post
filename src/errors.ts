@@ -12,6 +12,12 @@ export class Fault extends Error {
     super(message);
   }
 }
+// A readable Keet room whose self membership has not yet arrived.
+export class UnconfirmedKeetMembership extends Fault {
+  constructor() {
+    super("unavailable");
+  }
+}
 export function need(
   value: unknown,
   code: Fault["code"] = "not_found",

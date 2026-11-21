@@ -7,7 +7,7 @@ import type { Observation, Platform } from "./platform";
 import type { ContentV1, MessageV1 } from "../contracts/v1/index";
 import type { Service } from "./service";
 import { KeetSidecar, type RuntimeHashes } from "./keet-sidecar";
-import { Fault, need } from "./errors";
+import { Fault, need, UnconfirmedKeetMembership } from "./errors";
 import { isSqliteError } from "./store";
 
 const bounded = (v: unknown): v is string =>
@@ -206,7 +206,22 @@ export class KeetPlatform implements Platform {
       "unavailable",
     );
     need(info.status.isReadable && !info.status.isRemoved);
-    need(info.self?.member, "unavailable");
+    need(typeof info.status.isWritable === "boolean", "unavailable");
+    const kind = info.config.roomType;
+    need(kind === "0" || kind === "1" || kind === "2", "unavailable");
+    const type = kind === "2" ? "direct" : "group";
+    if (type === "direct")
+      need(
+        bounded(info.dmMemberId) && info.dmMemberId !== this.nativeUserId,
+        "unavailable",
+      );
+    need(
+      info.self !== null &&
+        typeof info.self === "object" &&
+        !Array.isArray(info.self),
+      "unavailable",
+    );
+    if (info.self.member == null) throw new UnconfirmedKeetMembership();
     const self = info.self.member;
     need(
       self.memberId === this.nativeUserId &&
@@ -214,8 +229,7 @@ export class KeetPlatform implements Platform {
         typeof self.status.isActive === "boolean" &&
         typeof self.status.isRemoved === "boolean" &&
         typeof self.status.isPending === "boolean" &&
-        typeof self.status.isBanned === "boolean" &&
-        typeof info.status.isWritable === "boolean",
+        typeof self.status.isBanned === "boolean",
       "unavailable",
     );
     need(
@@ -224,15 +238,8 @@ export class KeetPlatform implements Platform {
         self.status.isPending === false &&
         self.status.isBanned === false,
     );
-    const kind = info.config.roomType;
-    need(kind === "0" || kind === "1" || kind === "2", "unavailable");
-    const type = kind === "2" ? "direct" : "group";
     let peer: string | undefined;
     if (type === "direct") {
-      need(
-        bounded(info.dmMemberId) && info.dmMemberId !== this.nativeUserId,
-        "unavailable",
-      );
       peer = info.dmMemberId;
       const pending = await this.pending("direct", signal, true);
       need(!pending.some((i) => i.peer_id === peer || i.room_id === id));
@@ -261,7 +268,11 @@ export class KeetPlatform implements Platform {
       try {
         result.push(await this.room(item.roomId, signal));
       } catch (e) {
-        if (!(e instanceof Fault && e.code === "not_found")) throw e;
+        if (
+          !(e instanceof UnconfirmedKeetMembership) &&
+          !(e instanceof Fault && e.code === "not_found")
+        )
+          throw e;
       }
     }
     return result;

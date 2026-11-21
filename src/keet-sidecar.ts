@@ -200,8 +200,7 @@ export class KeetSidecar {
       version?.modules?.["keet-core"] !== "4.26.4" ||
       version?.buildType !== "Production" ||
       version?.abi?.min !== 40 ||
-      version?.abi?.max !== 40 ||
-      version?.abi?.autoupgrade !== 37
+      version?.abi?.max !== 40
     )
       throw new Error("version");
     await this.request(243, []);
