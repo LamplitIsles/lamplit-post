@@ -212,11 +212,20 @@ rpc.register(145, {
         if (encoded !== last) {
           last = encoded;
           stream.write(items);
+          if (fs.existsSync(path.join(identity, "trace-frames")))
+            fs.appendFileSync(
+              path.join(identity, "frames.jsonl"),
+              JSON.stringify(items.length) + "\n",
+            );
         }
       };
       push();
       const timer = setInterval(push, 50);
-      stream.once("close", () => clearInterval(timer));
+      stream.once("close", () => {
+        clearInterval(timer);
+        if (fs.existsSync(path.join(identity, "trace-frames")))
+          fs.appendFileSync(path.join(identity, "frames.jsonl"), "closed\n");
+      });
     });
   },
 });

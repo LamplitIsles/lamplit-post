@@ -51,9 +51,13 @@ Core write authority. Exiting, losing access, or a pending direct request stops
 access at the next operation or delivery check. Temporary Core failure holds
 pending deliveries; confirmed revocation cancels them. The settings administrator
 can inspect membership and handle invitations even when the binding is disabled.
-Names select conversations but do not grant access. First subscription frames are
-historical and do not wake the agent; unresolved native submissions are never
-resent automatically.
+Names select conversations but do not grant access. In every subscription frame,
+messages with a native timestamp before the current Post process started are
+archived as catch-up without waking the agent. Messages at or after startup follow
+the usual wake rules, including on the first frame and after reconnecting. Room
+resubscription, account recovery and settings changes do not reset this boundary.
+Sender clock skew near startup can affect classification. Unresolved native
+submissions are never resent automatically.
 
 Each identity uses a persistent `.keet-sidecar.lock`, shared with keet-for-agent,
 and Post holds the kernel lock until the actual worker exits. Never run two

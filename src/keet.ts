@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { Duplex } from "node:stream";
 import sharp from "sharp";
 import z32 from "z32";
@@ -10,6 +11,7 @@ import { KeetSidecar, type RuntimeHashes } from "./keet-sidecar";
 import { Fault, need, UnconfirmedKeetMembership } from "./errors";
 import { isSqliteError } from "./store";
 
+const processStart = Math.floor(performance.timeOrigin);
 const bounded = (v: unknown): v is string =>
   typeof v === "string" && v.length > 0 && v.length <= 256;
 function decodeCanonicalBase64(
@@ -341,12 +343,9 @@ export class KeetPlatform implements Platform {
     ]);
     const seen = new Map<string, string>();
     const task = (async () => {
-      let first = true;
       try {
         for await (const frame of stream) {
           if (!Array.isArray(frame)) throw new Error("invalid frame");
-          const initial = first;
-          first = false;
           for (const record of frame) {
             const id = nativeId(record?.id);
             if (!id) continue;
@@ -366,8 +365,7 @@ export class KeetPlatform implements Platform {
               continue;
             seen.set(id, mutationId);
             if (seen.size > 1024) seen.delete(seen.keys().next().value!);
-            if (!initial)
-              await this.capture(room, record, id, mutation, mutationId);
+            await this.capture(room, record, id, mutation, mutationId);
           }
         }
       } catch (error) {
@@ -498,7 +496,7 @@ export class KeetPlatform implements Platform {
       reply_native_id: nativeId(record.replyTo),
       mutation,
       mutation_id: mutationId,
-      catchup: false,
+      catchup: record.timestamp < processStart,
     };
     await this.service.observe(this.config.id, observation);
   }
